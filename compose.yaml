@@ -1,0 +1,45 @@
+name: eventharbor
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-eventharbor}
+      POSTGRES_USER: ${POSTGRES_USER:-eventharbor}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eventharbor}
+    ports:
+      - "5432:5432"
+    volumes:
+      - eventharbor-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+    command: ["uvicorn", "eventharbor.api:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    environment:
+      EVENTHARBOR_ENVIRONMENT: local
+      EVENTHARBOR_DATABASE_URL: postgresql+asyncpg://eventharbor:eventharbor@postgres:5432/eventharbor
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  receiver-lab:
+    build:
+      context: ./backend
+    command: ["uvicorn", "eventharbor.receiver_lab.api:app", "--host", "0.0.0.0", "--port", "8100", "--reload"]
+    ports:
+      - "8100:8100"
+    volumes:
+      - ./backend/src:/app/src
+
+volumes:
+  eventharbor-postgres:

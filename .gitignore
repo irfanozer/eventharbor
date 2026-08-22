@@ -1,0 +1,37 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+
+# JavaScript
+node_modules/
+frontend/dist/
+playwright-report/
+test-results/
+
+# Infrastructure and tools
+.terraform/
+*.tfstate
+*.tfstate.*
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local data
+.local/
+artifacts/

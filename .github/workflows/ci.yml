@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install backend
+        run: python -m pip install -e "./backend[dev]"
+
+      - name: Lint
+        run: ruff check backend
+
+      - name: Check formatting
+        run: ruff format --check backend
+
+      - name: Type check
+        working-directory: backend
+        run: mypy src
+
+      - name: Test
+        working-directory: backend
+        run: pytest
