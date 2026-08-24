@@ -36,6 +36,9 @@ packages = ["src/eventharbor"]
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers -q --cov=eventharbor --cov-report=term-missing --cov-fail-under=80"
 testpaths = ["tests"]
+markers = [
+  "integration: requires a dedicated PostgreSQL test database",
+]
 
 [tool.ruff]
 target-version = "py312"

@@ -2,28 +2,29 @@
 
 ## Milestone 1: foundation
 
-- Product and reliability contract
-- Explicit delivery state machine
-- Retry classification and bounded jitter
-- HMAC signing primitive
-- Receiver Lab skeleton
-- CI quality gates
+- [x] Product and reliability contract
+- [x] Explicit delivery state machine
+- [x] Retry classification and bounded jitter
+- [x] HMAC signing primitive
+- [x] Receiver Lab skeleton
+- [x] CI quality gates
 
 ## Milestone 2: first vertical slice
 
-- PostgreSQL migrations for endpoint, event, delivery, and attempt
-- Endpoint registration restricted to Receiver Lab locally
-- `POST /v1/events` with idempotency key
-- Worker lease and one outbound attempt
-- Attempt query API
-- End-to-end integration test against real PostgreSQL and Receiver Lab
+- [x] PostgreSQL migrations for endpoint, event, delivery, and attempt
+- [x] Endpoint registration restricted to Receiver Lab locally
+- [x] `POST /v1/events` with idempotency key
+- [x] Worker lease and signed outbound attempt
+- [x] Event and attempt query APIs
+- [x] End-to-end integration test against real PostgreSQL and Receiver Lab
 
 ## Milestone 3: reliability engine
 
-- Retry scheduling and `Retry-After`
-- Dead-letter state and manual replay generation
-- Lease recovery after worker termination
-- Property tests for transitions, idempotency, signatures, and timing bounds
+- [x] Retry scheduling and bounded `Retry-After`
+- [x] Dead-letter transition after terminal or exhausted attempts
+- [ ] Manual replay generation
+- [x] Lease recovery after worker termination
+- [ ] Property and concurrency tests for the full recovery contract
 
 ## Milestone 4: recruiter demo
 

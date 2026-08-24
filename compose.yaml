@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-eventharbor}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eventharbor}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - eventharbor-postgres:/var/lib/postgresql/data
     healthcheck:
@@ -17,29 +17,95 @@ services:
       timeout: 3s
       retries: 10
 
+  migrate:
+    build:
+      context: ./backend
+    command: ["alembic", "-c", "/app/alembic.ini", "upgrade", "head"]
+    environment:
+      EVENTHARBOR_ENVIRONMENT: local
+      EVENTHARBOR_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-eventharbor}:${POSTGRES_PASSWORD:-eventharbor}@postgres:5432/${POSTGRES_DB:-eventharbor}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
     build:
       context: ./backend
-    command: ["uvicorn", "eventharbor.api:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command:
+      [
+        "uvicorn",
+        "eventharbor.api:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--reload",
+        "--reload-dir",
+        "/app/src",
+      ]
     environment:
       EVENTHARBOR_ENVIRONMENT: local
-      EVENTHARBOR_DATABASE_URL: postgresql+asyncpg://eventharbor:eventharbor@postgres:5432/eventharbor
+      EVENTHARBOR_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-eventharbor}:${POSTGRES_PASSWORD:-eventharbor}@postgres:5432/${POSTGRES_DB:-eventharbor}
+      EVENTHARBOR_RECEIVER_LAB_URL: http://receiver-lab:8100/webhooks
+      PYTHONPATH: /app/src
     ports:
       - "8000:8000"
     volumes:
       - ./backend/src:/app/src
     depends_on:
-      postgres:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: ./backend
+    command: ["python", "-m", "eventharbor.deliveries.worker"]
+    restart: unless-stopped
+    environment:
+      EVENTHARBOR_ENVIRONMENT: local
+      EVENTHARBOR_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-eventharbor}:${POSTGRES_PASSWORD:-eventharbor}@postgres:5432/${POSTGRES_DB:-eventharbor}
+      EVENTHARBOR_RECEIVER_LAB_URL: http://receiver-lab:8100/webhooks
+      PYTHONPATH: /app/src
+    volumes:
+      - ./backend/src:/app/src
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      receiver-lab:
         condition: service_healthy
 
   receiver-lab:
     build:
       context: ./backend
-    command: ["uvicorn", "eventharbor.receiver_lab.api:app", "--host", "0.0.0.0", "--port", "8100", "--reload"]
+    command:
+      [
+        "uvicorn",
+        "eventharbor.receiver_lab.api:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8100",
+        "--reload",
+        "--reload-dir",
+        "/app/src",
+      ]
+    environment:
+      PYTHONPATH: /app/src
     ports:
       - "8100:8100"
     volumes:
       - ./backend/src:/app/src
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8100/health')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   eventharbor-postgres:

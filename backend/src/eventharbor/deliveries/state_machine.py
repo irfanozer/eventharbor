@@ -11,12 +11,20 @@ class DeliveryStatus(StrEnum):
     DEAD_LETTERED = "dead_lettered"
 
 
+class DeliveryAttemptStatus(StrEnum):
+    """Durable lifecycle of one reserved outbound attempt number."""
+
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    INDETERMINATE = "indeterminate"
+
+
 class InvalidDeliveryTransition(ValueError):
     """Raised when code attempts a forbidden delivery transition."""
 
 
 ALLOWED_TRANSITIONS: dict[DeliveryStatus, frozenset[DeliveryStatus]] = {
-    DeliveryStatus.PENDING: frozenset({DeliveryStatus.IN_PROGRESS}),
+    DeliveryStatus.PENDING: frozenset({DeliveryStatus.IN_PROGRESS, DeliveryStatus.DEAD_LETTERED}),
     DeliveryStatus.IN_PROGRESS: frozenset(
         {
             DeliveryStatus.DELIVERED,
@@ -24,7 +32,9 @@ ALLOWED_TRANSITIONS: dict[DeliveryStatus, frozenset[DeliveryStatus]] = {
             DeliveryStatus.DEAD_LETTERED,
         }
     ),
-    DeliveryStatus.RETRY_WAIT: frozenset({DeliveryStatus.IN_PROGRESS}),
+    DeliveryStatus.RETRY_WAIT: frozenset(
+        {DeliveryStatus.IN_PROGRESS, DeliveryStatus.DEAD_LETTERED}
+    ),
     DeliveryStatus.DELIVERED: frozenset(),
     DeliveryStatus.DEAD_LETTERED: frozenset(),
 }

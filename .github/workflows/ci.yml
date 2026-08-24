@@ -11,6 +11,24 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: eventharbor_test
+          POSTGRES_USER: eventharbor
+          POSTGRES_PASSWORD: eventharbor
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U eventharbor -d eventharbor_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      EVENTHARBOR_ENVIRONMENT: test
+      EVENTHARBOR_DATABASE_URL: postgresql+asyncpg://eventharbor:eventharbor@localhost:5432/eventharbor_test
+      EVENTHARBOR_TEST_DATABASE_URL: postgresql+asyncpg://eventharbor:eventharbor@localhost:5432/eventharbor_test
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -34,6 +52,10 @@ jobs:
       - name: Type check
         working-directory: backend
         run: mypy src
+
+      - name: Apply database migrations
+        working-directory: backend
+        run: alembic upgrade head
 
       - name: Test
         working-directory: backend

@@ -4,17 +4,22 @@
 
 EventHarbor is a production-minded webhook delivery platform for systems whose
 destinations may be slow, rate-limited, unavailable, or broken. It durably
-accepts events, signs outbound requests, records every delivery attempt,
-retries transient failures, dead-letters exhausted deliveries, and preserves a
-complete replay history.
+accepts events, reserves attempt evidence before outbound network I/O, signs
+requests, records completed or indeterminate outcomes, retries transient
+failures, and dead-letters exhausted deliveries. If a worker crashes during the
+indeterminate window around an HTTP request, its expired lease is resolved and
+the event is redelivered while the configured attempt budget remains.
 
-> Project status: foundation. The reliability contract and initial domain code
-> are implemented. Persistence, delivery workers, and the dashboard are being
-> built in public; no unimplemented capability is presented as complete.
+> Project status: first vertical slice complete. PostgreSQL persistence,
+> idempotent ingestion, signed delivery, retry scheduling, attempt evidence,
+> expired-lease crash recovery, Docker orchestration, and a real PostgreSQL
+> integration test are implemented. Manual replay, workspace isolation, and the
+> React Control Room remain explicit future milestones.
 
-## Signature demonstration
+## Target signature demonstration
 
-The public demo is designed around one inspectable failure-and-recovery story:
+The finished public demo is designed around one inspectable
+failure-and-recovery story:
 
 ```text
 Publish event
@@ -26,41 +31,43 @@ Publish event
   -> the signed delivery succeeds
 ```
 
-The receiver laboratory makes each failure deterministic, so the same scenario
-can be reproduced in a browser, locally, and in CI.
+The current vertical slice proves durable publish, signed delivery, retries,
+dead-letter transitions, lease recovery, and persisted attempt evidence through
+the API and automated tests. Manual replay and the browser Control Room still
+need to be added before the full story above is reproducible end to end.
 
 ## Reliability contract
 
 EventHarbor promises **at-least-once delivery**, not exactly-once HTTP delivery.
 A worker can crash after the destination accepts a request but before success is
-recorded, creating an unavoidable duplicate-delivery window. Stable event IDs
-allow consumers to deduplicate safely.
+recorded, creating an unavoidable duplicate-delivery window. An expired worker
+lease is reclaimed with a new fenced attempt; stable event IDs allow consumers
+to deduplicate safely.
 
 The core guarantees and limitations are documented in
 [`docs/reliability-contract.md`](docs/reliability-contract.md).
 
-## Planned architecture
+## Architecture
 
-- Python and FastAPI for the API, delivery worker, and receiver laboratory
-- PostgreSQL as the authoritative store and initial durable scheduler
-- React and TypeScript for the operator dashboard
-- HTTPX for outbound webhook delivery
-- OpenTelemetry for correlated logs, metrics, and traces
-- Docker Compose for local development
-- Azure Container Apps, Azure Database for PostgreSQL, and Key Vault in production
-- Terraform for reproducible cloud infrastructure
+- Python and FastAPI power the API, delivery worker, and Receiver Lab.
+- PostgreSQL is the authoritative store and durable work scheduler.
+- SQLAlchemy and Alembic provide typed persistence and versioned migrations.
+- HTTPX sends exact, HMAC-signed webhook bytes without following redirects.
+- Docker Compose starts PostgreSQL, migrations, API, worker, and Receiver Lab.
+- React, OpenTelemetry, Azure, Key Vault, and Terraform are later milestones.
 
 The initial system is a modular monolith with independent API and worker
 processes. It deliberately avoids Kafka, Kubernetes, and premature
 microservices. See [`docs/architecture.md`](docs/architecture.md).
 
-## Local foundation
+## Local vertical slice
 
 Prerequisites:
 
 - Docker Desktop with Docker Compose, or Python 3.12+
 
-Start PostgreSQL, the API, and the deterministic receiver laboratory:
+Start PostgreSQL, apply migrations, then run the API, worker, and deterministic
+Receiver Lab:
 
 ```bash
 docker compose up --build
@@ -72,6 +79,13 @@ Then visit:
 - API documentation: <http://localhost:8000/docs>
 - Receiver Lab health: <http://localhost:8100/health>
 - Receiver Lab documentation: <http://localhost:8100/docs>
+
+Follow [`docs/local-demo.md`](docs/local-demo.md) to register the local
+destination, publish an idempotent event, and inspect its persisted attempt.
+
+If port `5432` is already used by PostgreSQL on your machine, create `.env` and
+set `POSTGRES_PORT=55432`. Container-to-container connections still use
+`postgres:5432`.
 
 Run the Python checks without Docker:
 
@@ -90,10 +104,10 @@ pytest
 
 ```text
 backend/                 FastAPI applications and delivery-domain code
-frontend/                React dashboard (next milestone)
+frontend/                React Control Room placeholder (Milestone 4)
 docs/                    Product, architecture, guarantees, and decisions
 docs/adr/                Architecture decision records
-infra/                   Azure and local infrastructure (later milestone)
+infra/                   Azure infrastructure (later milestone)
 .github/workflows/       Continuous integration
 compose.yaml             Local services
 ```

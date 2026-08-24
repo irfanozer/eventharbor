@@ -19,8 +19,10 @@ React dashboard -----> FastAPI query APIs
 The API and worker are separate process modes built from the same backend
 artifact. PostgreSQL is the source of truth and initial durable scheduler.
 Workers claim due delivery rows with short leases and `FOR UPDATE SKIP LOCKED`,
-perform network I/O outside the claim transaction, then append an immutable
-attempt and update delivery state.
+reserve an `in_progress` attempt in the same transaction, then perform network
+I/O without holding the row lock. The result resolves that reserved row and the
+delivery state together. If the lease expires first, recovery marks the row
+`indeterminate` before reserving another attempt or dead-lettering.
 
 ## Module boundaries
 
@@ -36,17 +38,35 @@ attempt and update delivery state.
 Modules expose services and repositories rather than reaching into another
 module's persistence implementation.
 
-## Planned data model
+## Implemented vertical-slice data model
+
+- `endpoints`
+- `events`
+- `deliveries`
+- `delivery_attempts`
+
+The schema enforces `(source, idempotency_key)`,
+`(event_id, endpoint_id, replay_generation)`, and
+`(delivery_id, attempt_number)` uniqueness. Exact canonical outbound bytes are
+stored alongside queryable JSONB so retries never re-serialize a payload. Each
+event stores two deliberately separate SHA-256 values:
+
+- `request_fingerprint_sha256` hashes the endpoint, event type, and data used
+  to decide whether an `Idempotency-Key` retry is the same request.
+- `payload_sha256` hashes the exact `payload_bytes` sent to the destination,
+  so the persisted outbound body can be verified byte for byte.
+
+Every committed delivery claim has exactly one attempt row carrying the same
+lease token and attempt number. Attempt identity is append-only; its lifecycle
+moves once from `in_progress` to either `completed` or `indeterminate`.
+
+## Planned expansion
 
 - `workspaces`
 - `api_keys` (hashed; plaintext shown once)
 - `sources`
-- `endpoints`
 - `endpoint_secrets` (encrypted and versioned)
 - `subscriptions`
-- `events`
-- `deliveries`
-- `delivery_attempts`
 - `audit_entries`
 - `diagnostic_runs`
 

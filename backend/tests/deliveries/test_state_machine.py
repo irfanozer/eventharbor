@@ -11,10 +11,12 @@ from eventharbor.deliveries.state_machine import (
     ("current", "target"),
     [
         (DeliveryStatus.PENDING, DeliveryStatus.IN_PROGRESS),
+        (DeliveryStatus.PENDING, DeliveryStatus.DEAD_LETTERED),
         (DeliveryStatus.IN_PROGRESS, DeliveryStatus.DELIVERED),
         (DeliveryStatus.IN_PROGRESS, DeliveryStatus.RETRY_WAIT),
         (DeliveryStatus.IN_PROGRESS, DeliveryStatus.DEAD_LETTERED),
         (DeliveryStatus.RETRY_WAIT, DeliveryStatus.IN_PROGRESS),
+        (DeliveryStatus.RETRY_WAIT, DeliveryStatus.DEAD_LETTERED),
     ],
 )
 def test_documented_transitions_are_allowed(
