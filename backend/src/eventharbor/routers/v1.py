@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from eventharbor.config import Settings, get_settings
 from eventharbor.database import get_session
+from eventharbor.deliveries.state_machine import DeliveryStatus
 from eventharbor.errors import DomainError
 from eventharbor.repositories import DeliveryRepository, EndpointRepository, EventRepository
 from eventharbor.schemas import (
@@ -19,8 +20,9 @@ from eventharbor.schemas import (
     EventAcceptedResponse,
     EventDetailResponse,
     EventPublishRequest,
+    ReplayAcceptedResponse,
 )
-from eventharbor.services import EndpointService, EventService, QueryService
+from eventharbor.services import EndpointService, EventService, QueryService, ReplayService
 
 router = APIRouter(prefix="/v1")
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -103,6 +105,51 @@ async def publish_event(
         type=result.event.event_type,
         status=result.delivery.status,
         created_at=result.event.created_at,
+    )
+
+
+@router.post(
+    "/deliveries/{delivery_id}/replays",
+    response_model=ReplayAcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["deliveries"],
+)
+async def replay_delivery(
+    delivery_id: UUID,
+    response: Response,
+    session: Session,
+    idempotency_key: IdempotencyKey,
+) -> ReplayAcceptedResponse:
+    """Create a new generation from the latest dead-lettered delivery."""
+
+    if not idempotency_key.strip():
+        raise DomainError(
+            status_code=422,
+            code="invalid_idempotency_key",
+            title="Idempotency key is invalid",
+            detail="Idempotency-Key must contain at least one non-whitespace character.",
+        )
+
+    async with session.begin():
+        result = await ReplayService(
+            EndpointRepository(session),
+            EventRepository(session),
+            DeliveryRepository(session),
+        ).replay(delivery_id, idempotency_key)
+
+    replay = result.delivery
+    response.headers["X-EventHarbor-Idempotent-Replay"] = str(result.idempotent_replay).lower()
+    response.headers["Location"] = f"/v1/deliveries/{replay.id}/attempts"
+    return ReplayAcceptedResponse(
+        source_delivery_id=result.source_delivery.id,
+        delivery_id=replay.id,
+        event_id=replay.event_id,
+        endpoint_id=replay.endpoint_id,
+        replay_generation=replay.replay_generation,
+        # An idempotent retry must reproduce the original acceptance body even if the
+        # worker has since advanced the delivery to a terminal state.
+        status=DeliveryStatus.PENDING,
+        created_at=replay.created_at,
     )
 
 

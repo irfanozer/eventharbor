@@ -13,8 +13,9 @@ the event is redelivered while the configured attempt budget remains.
 > Project status: first vertical slice complete. PostgreSQL persistence,
 > idempotent ingestion, signed delivery, retry scheduling, attempt evidence,
 > expired-lease crash recovery, Docker orchestration, and a real PostgreSQL
-> integration test are implemented. Manual replay, workspace isolation, and the
-> React Control Room remain explicit future milestones.
+> integration test are implemented. Operator-approved, idempotent manual replay
+> is also implemented. Workspace isolation and the React Control Room remain
+> explicit future milestones.
 
 ## Target signature demonstration
 
@@ -32,9 +33,9 @@ Publish event
 ```
 
 The current vertical slice proves durable publish, signed delivery, retries,
-dead-letter transitions, lease recovery, and persisted attempt evidence through
-the API and automated tests. Manual replay and the browser Control Room still
-need to be added before the full story above is reproducible end to end.
+dead-letter transitions, lease recovery, persisted attempt evidence, and
+operator-approved replay through the API and automated tests. The browser
+Control Room still needs to be added before the full story has a visual UI.
 
 ## Reliability contract
 
@@ -81,7 +82,9 @@ Then visit:
 - Receiver Lab documentation: <http://localhost:8100/docs>
 
 Follow [`docs/local-demo.md`](docs/local-demo.md) to register the local
-destination, publish an idempotent event, and inspect its persisted attempt.
+destination, publish an idempotent event, inspect its persisted attempt, force a
+dead letter, repair the receiver, and replay the delivery without erasing its
+original history.
 
 If port `5432` is already used by PostgreSQL on your machine, create `.env` and
 set `POSTGRES_PORT=55432`. Container-to-container connections still use

@@ -18,7 +18,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 V1 = "20260823_0001"
 V2 = "20260823_0002"
-HEAD = "20260823_0003"
+V3 = "20260823_0003"
+HEAD = "20260823_0004"
 
 ENDPOINT_ID = UUID("00000000-0000-0000-0000-000000000101")
 EVENT_ID = UUID("00000000-0000-0000-0000-000000000102")
@@ -204,7 +205,7 @@ async def test_data_bearing_migrations_round_trip(
         assert event_at_v2["payload_sha256"] == PAYLOAD_DIGEST
 
         _alembic(database_url, "upgrade", HEAD)
-        attempts_at_v3 = await _rows(
+        attempts_at_head = await _rows(
             database_url,
             """
             SELECT id, delivery_id, attempt_number, status, lease_token, disposition,
@@ -215,9 +216,9 @@ async def test_data_bearing_migrations_round_trip(
             """,
             {},
         )
-        assert len(attempts_at_v3) == 2
+        assert len(attempts_at_head) == 2
 
-        completed, leased = attempts_at_v3
+        completed, leased = attempts_at_head
         assert completed["id"] == COMPLETED_ATTEMPT_ID
         assert completed["delivery_id"] == COMPLETED_DELIVERY_ID
         assert completed["attempt_number"] == 1
@@ -250,6 +251,117 @@ async def test_data_bearing_migrations_round_trip(
         ):
             assert leased[empty_field] is None
         assert leased["created_at"] == LEASE_UPDATED_AT
+
+        deliveries_at_head = await _rows(
+            database_url,
+            """
+            SELECT id, replay_generation, replayed_from_delivery_id,
+                   replay_idempotency_key
+            FROM deliveries ORDER BY replay_generation
+            """,
+            {},
+        )
+        assert [row["id"] for row in deliveries_at_head] == [
+            COMPLETED_DELIVERY_ID,
+            LEASED_DELIVERY_ID,
+        ]
+        assert [row["replay_generation"] for row in deliveries_at_head] == [0, 1]
+        assert all(row["replayed_from_delivery_id"] is None for row in deliveries_at_head)
+        assert all(row["replay_idempotency_key"] is None for row in deliveries_at_head)
+
+        replay_columns = await _rows(
+            database_url,
+            """
+            SELECT column_name, data_type, character_maximum_length, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'deliveries'
+              AND column_name IN ('replayed_from_delivery_id', 'replay_idempotency_key')
+            ORDER BY column_name
+            """,
+            {},
+        )
+        assert replay_columns == [
+            {
+                "column_name": "replay_idempotency_key",
+                "data_type": "character varying",
+                "character_maximum_length": 255,
+                "is_nullable": "YES",
+            },
+            {
+                "column_name": "replayed_from_delivery_id",
+                "data_type": "uuid",
+                "character_maximum_length": None,
+                "is_nullable": "YES",
+            },
+        ]
+
+        delivery_constraints = await _rows(
+            database_url,
+            """
+            SELECT conname
+            FROM pg_constraint
+            WHERE conrelid = 'deliveries'::regclass
+              AND conname IN (
+                'fk_deliveries_replayed_from_delivery_id_deliveries',
+                'uq_deliveries_replayed_from_delivery_id_replay_idempotency_key',
+                'ck_deliveries_replay_metadata_set_together',
+                'ck_deliveries_replay_idempotency_key_not_empty'
+              )
+            ORDER BY conname
+            """,
+            {},
+        )
+        assert {row["conname"] for row in delivery_constraints} == {
+            "fk_deliveries_replayed_from_delivery_id_deliveries",
+            "uq_deliveries_replayed_from_delivery_id_replay_idempotency_key",
+            "ck_deliveries_replay_metadata_set_together",
+            "ck_deliveries_replay_idempotency_key_not_empty",
+        }
+
+        active_index = await _row(
+            database_url,
+            """
+            SELECT indexdef
+            FROM pg_indexes
+            WHERE schemaname = current_schema()
+              AND tablename = 'deliveries'
+              AND indexname = 'uq_deliveries_one_active_per_event_endpoint'
+            """,
+            {},
+        )
+        assert "CREATE UNIQUE INDEX" in active_index["indexdef"]
+        assert "event_id, endpoint_id" in active_index["indexdef"]
+        assert "pending" in active_index["indexdef"]
+        assert "in_progress" in active_index["indexdef"]
+        assert "retry_wait" in active_index["indexdef"]
+
+        _alembic(database_url, "downgrade", V3)
+        deliveries_at_v3 = await _rows(
+            database_url,
+            """
+            SELECT id, replay_generation, status
+            FROM deliveries ORDER BY replay_generation
+            """,
+            {},
+        )
+        assert [row["id"] for row in deliveries_at_v3] == [
+            COMPLETED_DELIVERY_ID,
+            LEASED_DELIVERY_ID,
+        ]
+        assert [row["status"] for row in deliveries_at_v3] == ["delivered", "in_progress"]
+        replay_columns_after_downgrade = await _rows(
+            database_url,
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'deliveries'
+              AND column_name IN ('replayed_from_delivery_id', 'replay_idempotency_key')
+            """,
+            {},
+        )
+        assert replay_columns_after_downgrade == []
 
         _alembic(database_url, "downgrade", V2)
         attempts_at_v2 = await _rows(

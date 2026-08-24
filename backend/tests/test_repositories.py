@@ -92,3 +92,30 @@ async def test_delivery_repository_covers_create_and_read_models() -> None:
     assert await repository.list_attempts(uuid4()) == [attempt]
     session.add.assert_called_once_with(delivery)
     session.flush.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_replay_repository_queries_lock_and_order_the_delivery_chain() -> None:
+    delivery = MagicMock(spec=Delivery)
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = delivery
+    session = MagicMock(spec=AsyncSession)
+    session.execute = AsyncMock(return_value=result)
+    repository = DeliveryRepository(session)
+
+    assert await repository.get_for_update(uuid4()) is delivery
+    assert await repository.get_by_replay_request(uuid4(), "replay-key") is delivery
+    assert await repository.get_latest(uuid4(), uuid4()) is delivery
+    assert await repository.get_active(uuid4(), uuid4()) is delivery
+    assert session.execute.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_event_repository_can_lock_the_replay_mutex() -> None:
+    event = MagicMock(spec=Event)
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = event
+    session = MagicMock(spec=AsyncSession)
+    session.execute = AsyncMock(return_value=result)
+
+    assert await EventRepository(session).get_for_update(uuid4()) is event

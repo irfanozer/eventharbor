@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from uuid import UUID, uuid4
 
+from eventharbor.deliveries.state_machine import DeliveryStatus
 from eventharbor.errors import DomainError
 from eventharbor.models import Delivery, DeliveryAttempt, Endpoint, Event
 from eventharbor.repositories import (
@@ -52,6 +53,13 @@ class EventDetails:
 class DeliveryAttempts:
     delivery: Delivery
     attempts: Sequence[DeliveryAttempt]
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayedDelivery:
+    source_delivery: Delivery
+    delivery: Delivery
+    idempotent_replay: bool
 
 
 class EndpointService:
@@ -211,6 +219,111 @@ class EventService:
         if delivery is None:
             raise RuntimeError("accepted event is missing its initial delivery")
         return PublishedEvent(event=event, delivery=delivery, idempotent_replay=True)
+
+
+class ReplayService:
+    """Create one durable, idempotent successor for a dead-letter delivery."""
+
+    def __init__(
+        self,
+        endpoints: EndpointRepository,
+        events: EventRepository,
+        deliveries: DeliveryRepository,
+    ) -> None:
+        self._endpoints = endpoints
+        self._events = events
+        self._deliveries = deliveries
+
+    async def replay(self, delivery_id: UUID, idempotency_key: str) -> ReplayedDelivery:
+        candidate = await self._deliveries.get(delivery_id)
+        if candidate is None:
+            raise DomainError(
+                status_code=404,
+                code="delivery_not_found",
+                title="Delivery not found",
+                detail=f"Delivery {delivery_id} does not exist.",
+            )
+
+        # Every generation in this event chain shares this stable mutex. The database
+        # constraints remain the final safety net, while the lock makes all expected
+        # conflicts deterministic instead of surfacing an IntegrityError.
+        event = await self._events.get_for_update(candidate.event_id)
+        if event is None:
+            raise RuntimeError("delivery references an event that could not be locked")
+        source = await self._deliveries.get_for_update(delivery_id)
+        if source is None:
+            raise RuntimeError("delivery disappeared after its event was locked")
+
+        existing = await self._deliveries.get_by_replay_request(source.id, idempotency_key)
+        if existing is not None:
+            return ReplayedDelivery(
+                source_delivery=source,
+                delivery=existing,
+                idempotent_replay=True,
+            )
+
+        latest = await self._deliveries.get_latest(source.event_id, source.endpoint_id)
+        if latest is None:
+            raise RuntimeError("delivery chain has no latest generation")
+        if latest.id != source.id:
+            raise DomainError(
+                status_code=409,
+                code="replay_source_superseded",
+                title="Replay source has been superseded",
+                detail=(
+                    f"Delivery {delivery_id} has already been superseded by delivery {latest.id}."
+                ),
+            )
+        if source.status != DeliveryStatus.DEAD_LETTERED:
+            raise DomainError(
+                status_code=409,
+                code="delivery_not_replayable",
+                title="Delivery is not replayable",
+                detail=(
+                    f"Delivery {delivery_id} has status {source.status.value}; only the latest "
+                    "dead-lettered generation can be replayed."
+                ),
+            )
+
+        active = await self._deliveries.get_active(source.event_id, source.endpoint_id)
+        if active is not None:
+            raise DomainError(
+                status_code=409,
+                code="active_delivery_exists",
+                title="An active delivery already exists",
+                detail=(f"Delivery {active.id} is already active for this event and endpoint."),
+            )
+
+        endpoint = await self._endpoints.get(source.endpoint_id)
+        if endpoint is None:
+            raise RuntimeError("delivery references an endpoint that does not exist")
+        if not endpoint.enabled:
+            raise DomainError(
+                status_code=409,
+                code="endpoint_disabled",
+                title="Endpoint is disabled",
+                detail=f"Endpoint {endpoint.id} cannot accept a replay delivery.",
+            )
+
+        now = datetime.now(UTC)
+        replay = Delivery(
+            id=uuid4(),
+            event_id=source.event_id,
+            endpoint_id=source.endpoint_id,
+            replay_generation=source.replay_generation + 1,
+            replayed_from_delivery_id=source.id,
+            replay_idempotency_key=idempotency_key,
+            status=DeliveryStatus.PENDING,
+            attempt_count=0,
+            created_at=now,
+            updated_at=now,
+        )
+        await self._deliveries.create(replay)
+        return ReplayedDelivery(
+            source_delivery=source,
+            delivery=replay,
+            idempotent_replay=False,
+        )
 
 
 class QueryService:

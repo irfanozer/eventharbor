@@ -11,7 +11,7 @@ from eventharbor.errors import DomainError
 from eventharbor.models import Delivery, Endpoint, Event
 from eventharbor.schemas import EndpointCreateRequest, EventPublishRequest
 from eventharbor.serialization import canonical_sha256
-from eventharbor.services import EndpointService, EventService, QueryService
+from eventharbor.services import EndpointService, EventService, QueryService, ReplayService
 
 
 def endpoint(*, enabled: bool = True) -> Endpoint:
@@ -107,10 +107,23 @@ class FakeEventRepository:
             return self.existing
         return None
 
+    async def get_for_update(self, event_id: UUID) -> Event | None:
+        return await self.get(event_id)
+
 
 class FakeDeliveryRepository:
-    def __init__(self, initial: Delivery | None = None) -> None:
+    def __init__(
+        self,
+        initial: Delivery | None = None,
+        *,
+        latest: Delivery | None = None,
+        existing_replay: Delivery | None = None,
+        active: Delivery | None = None,
+    ) -> None:
         self.initial = initial
+        self.latest = latest or initial
+        self.existing_replay = existing_replay
+        self.active = active
         self.created: Delivery | None = None
         self.attempts = []
 
@@ -129,6 +142,26 @@ class FakeDeliveryRepository:
         if self.initial is not None and self.initial.id == delivery_id:
             return self.initial
         return None
+
+    async def get_for_update(self, delivery_id: UUID) -> Delivery | None:
+        return await self.get(delivery_id)
+
+    async def get_by_replay_request(
+        self, source_delivery_id: UUID, idempotency_key: str
+    ) -> Delivery | None:
+        if (
+            self.existing_replay is not None
+            and self.existing_replay.replayed_from_delivery_id == source_delivery_id
+            and self.existing_replay.replay_idempotency_key == idempotency_key
+        ):
+            return self.existing_replay
+        return None
+
+    async def get_latest(self, event_id: UUID, endpoint_id: UUID) -> Delivery | None:
+        return self.latest
+
+    async def get_active(self, event_id: UUID, endpoint_id: UUID) -> Delivery | None:
+        return self.active
 
     async def get_with_attempts(self, delivery_id: UUID) -> Delivery | None:
         if self.initial is not None and self.initial.id == delivery_id:
@@ -256,6 +289,109 @@ async def test_publish_rejects_invalid_targets_and_data(case: str) -> None:
         "invalid_json": "invalid_event_data",
     }
     assert raised.value.code == expected[case]
+
+
+@pytest.mark.asyncio
+async def test_replay_creates_a_new_pending_generation_without_mutating_source() -> None:
+    target = endpoint()
+    request = EventPublishRequest(endpoint_id=target.id, type="invoice.paid", data={})
+    existing_event = event_for(request, "publish-key")
+    source = delivery_for(existing_event, target)
+    source.status = DeliveryStatus.DEAD_LETTERED
+    source.attempt_count = 8
+    deliveries = FakeDeliveryRepository(source)
+    service = ReplayService(
+        FakeEndpointRepository(target),
+        FakeEventRepository(inserted=False, existing=existing_event),
+        deliveries,
+    )
+
+    result = await service.replay(source.id, "replay-key")
+
+    assert result.source_delivery is source
+    assert source.status == DeliveryStatus.DEAD_LETTERED
+    assert source.attempt_count == 8
+    assert result.idempotent_replay is False
+    assert result.delivery is deliveries.created
+    assert result.delivery.id != source.id
+    assert result.delivery.status == DeliveryStatus.PENDING
+    assert result.delivery.attempt_count == 0
+    assert result.delivery.replay_generation == 1
+    assert result.delivery.replayed_from_delivery_id == source.id
+    assert result.delivery.replay_idempotency_key == "replay-key"
+
+
+@pytest.mark.asyncio
+async def test_replay_returns_existing_request_before_rechecking_eligibility() -> None:
+    target = endpoint(enabled=False)
+    request = EventPublishRequest(endpoint_id=target.id, type="invoice.paid", data={})
+    existing_event = event_for(request, "publish-key")
+    source = delivery_for(existing_event, target)
+    source.status = DeliveryStatus.DEAD_LETTERED
+    replay = delivery_for(existing_event, target)
+    replay.replay_generation = 1
+    replay.replayed_from_delivery_id = source.id
+    replay.replay_idempotency_key = "same-replay-key"
+    deliveries = FakeDeliveryRepository(
+        source,
+        latest=replay,
+        existing_replay=replay,
+        active=replay,
+    )
+    service = ReplayService(
+        FakeEndpointRepository(target),
+        FakeEventRepository(inserted=False, existing=existing_event),
+        deliveries,
+    )
+
+    result = await service.replay(source.id, "same-replay-key")
+
+    assert result.delivery is replay
+    assert result.idempotent_replay is True
+    assert deliveries.created is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    [
+        ("missing", "delivery_not_found"),
+        ("not_dead_lettered", "delivery_not_replayable"),
+        ("superseded", "replay_source_superseded"),
+        ("active", "active_delivery_exists"),
+        ("endpoint_disabled", "endpoint_disabled"),
+    ],
+)
+async def test_replay_rejects_unsafe_requests(case: str, expected_code: str) -> None:
+    target = endpoint(enabled=case != "endpoint_disabled")
+    request = EventPublishRequest(endpoint_id=target.id, type="invoice.paid", data={})
+    existing_event = event_for(request, "publish-key")
+    source = delivery_for(existing_event, target)
+    source.status = (
+        DeliveryStatus.PENDING if case == "not_dead_lettered" else DeliveryStatus.DEAD_LETTERED
+    )
+    latest = source
+    if case == "superseded":
+        latest = delivery_for(existing_event, target)
+        latest.replay_generation = 1
+        latest.status = DeliveryStatus.DELIVERED
+    active = delivery_for(existing_event, target) if case == "active" else None
+    if active is not None:
+        active.replay_generation = 1
+    deliveries = FakeDeliveryRepository(source, latest=latest, active=active)
+    if case == "missing":
+        deliveries.initial = None
+    service = ReplayService(
+        FakeEndpointRepository(target),
+        FakeEventRepository(inserted=False, existing=existing_event),
+        deliveries,
+    )
+
+    with pytest.raises(DomainError) as raised:
+        await service.replay(source.id, "new-replay-key")
+
+    assert raised.value.status_code in {404, 409}
+    assert raised.value.code == expected_code
 
 
 @pytest.mark.asyncio

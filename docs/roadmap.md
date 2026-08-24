@@ -22,7 +22,7 @@
 
 - [x] Retry scheduling and bounded `Retry-After`
 - [x] Dead-letter transition after terminal or exhausted attempts
-- [ ] Manual replay generation
+- [x] Manual replay generation
 - [x] Lease recovery after worker termination
 - [ ] Property and concurrency tests for the full recovery contract
 

@@ -60,6 +60,16 @@ Every committed delivery claim has exactly one attempt row carrying the same
 lease token and attempt number. Attempt identity is append-only; its lifecycle
 moves once from `in_progress` to either `completed` or `indeterminate`.
 
+Manual replay is an explicit API mutation, not a state reset. The API locks the
+stable event row, verifies that the requested source is the latest delivery
+generation and is `dead_lettered`, and appends a new `pending` delivery with the
+next `replay_generation`. Its attempts begin again at one while the immutable
+event, source delivery, and all source attempt evidence remain unchanged. A
+caller-supplied `Idempotency-Key` makes retries of the replay request safe. The
+event lock, replay metadata constraints, and a partial unique index over active
+event-endpoint deliveries prevent concurrent replay requests from creating two
+active generations.
+
 ## Planned expansion
 
 - `workspaces`

@@ -43,6 +43,10 @@ def test_idempotency_and_delivery_generation_have_database_uniqueness() -> None:
 
     assert ("source", "idempotency_key") in event_unique_columns
     assert ("event_id", "endpoint_id", "replay_generation") in delivery_unique_columns
+    assert (
+        "replayed_from_delivery_id",
+        "replay_idempotency_key",
+    ) in delivery_unique_columns
     assert ("delivery_id", "attempt_number") in attempt_unique_columns
     assert ("delivery_id", "lease_token") in attempt_unique_columns
 
@@ -84,6 +88,17 @@ def test_due_delivery_index_is_partial_and_attempt_fields_are_guarded() -> None:
     in_progress_ddl = str(CreateIndex(in_progress_index).compile(dialect=postgresql.dialect()))
     assert "UNIQUE" in in_progress_ddl
     assert "WHERE status = 'in_progress'" in in_progress_ddl
+
+    active_delivery_index = next(
+        index
+        for index in Delivery.__table__.indexes
+        if index.name == "uq_deliveries_one_active_per_event_endpoint"
+    )
+    active_delivery_ddl = str(
+        CreateIndex(active_delivery_index).compile(dialect=postgresql.dialect())
+    )
+    assert "UNIQUE" in active_delivery_ddl
+    assert "WHERE status IN ('pending', 'in_progress', 'retry_wait')" in active_delivery_ddl
 
 
 def test_event_hash_columns_have_independent_length_constraints() -> None:

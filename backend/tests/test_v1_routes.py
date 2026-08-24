@@ -14,6 +14,7 @@ from eventharbor.routers.v1 import (
     get_delivery_attempts,
     get_event,
     publish_event,
+    replay_delivery,
 )
 from eventharbor.schemas import EndpointCreateRequest, EventPublishRequest
 from eventharbor.services import (
@@ -24,6 +25,8 @@ from eventharbor.services import (
     EventService,
     PublishedEvent,
     QueryService,
+    ReplayedDelivery,
+    ReplayService,
 )
 
 
@@ -152,6 +155,51 @@ async def test_publish_route_rejects_blank_idempotency_key() -> None:
             Session(),
             "   ",
         )
+    assert raised.value.code == "invalid_idempotency_key"
+
+
+@pytest.mark.asyncio
+async def test_replay_route_sets_location_and_idempotency_headers(monkeypatch) -> None:
+    _, _, source, _ = objects()
+    source.status = DeliveryStatus.DEAD_LETTERED
+    replay = Delivery(
+        id=uuid4(),
+        event_id=source.event_id,
+        endpoint_id=source.endpoint_id,
+        replay_generation=1,
+        replayed_from_delivery_id=source.id,
+        replay_idempotency_key="replay-key",
+        status=DeliveryStatus.PENDING,
+        attempt_count=0,
+        next_attempt_at=source.created_at,
+        created_at=source.created_at,
+        updated_at=source.updated_at,
+    )
+
+    async def fake_replay(service, delivery_id, idempotency_key):
+        assert delivery_id == source.id
+        assert idempotency_key == "replay-key"
+        return ReplayedDelivery(source, replay, True)
+
+    monkeypatch.setattr(ReplayService, "replay", fake_replay)
+    response = Response()
+
+    result = await replay_delivery(source.id, response, Session(), "replay-key")
+
+    assert result.source_delivery_id == source.id
+    assert result.delivery_id == replay.id
+    assert result.replay_generation == 1
+    assert response.headers["X-EventHarbor-Idempotent-Replay"] == "true"
+    assert response.headers["Location"] == f"/v1/deliveries/{replay.id}/attempts"
+
+
+@pytest.mark.asyncio
+async def test_replay_route_rejects_blank_idempotency_key() -> None:
+    _, _, delivery, _ = objects()
+
+    with pytest.raises(DomainError) as raised:
+        await replay_delivery(delivery.id, Response(), Session(), "  ")
+
     assert raised.value.code == "invalid_idempotency_key"
 
 

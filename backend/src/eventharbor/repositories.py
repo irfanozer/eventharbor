@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from eventharbor.deliveries.state_machine import DeliveryStatus
 from eventharbor.models import Delivery, DeliveryAttempt, Endpoint, Event
 
 
@@ -82,6 +83,12 @@ class EventRepository:
     async def get(self, event_id: UUID) -> Event | None:
         return await self._session.get(Event, event_id)
 
+    async def get_for_update(self, event_id: UUID) -> Event | None:
+        """Lock the stable event row used to serialize delivery generations."""
+
+        statement = select(Event).where(Event.id == event_id).with_for_update()
+        return (await self._session.execute(statement)).scalar_one_or_none()
+
 
 class DeliveryRepository:
     """Persistence and read-model operations for delivery generations."""
@@ -112,6 +119,47 @@ class DeliveryRepository:
 
     async def get(self, delivery_id: UUID) -> Delivery | None:
         return await self._session.get(Delivery, delivery_id)
+
+    async def get_for_update(self, delivery_id: UUID) -> Delivery | None:
+        statement = select(Delivery).where(Delivery.id == delivery_id).with_for_update()
+        return (await self._session.execute(statement)).scalar_one_or_none()
+
+    async def get_by_replay_request(
+        self,
+        source_delivery_id: UUID,
+        idempotency_key: str,
+    ) -> Delivery | None:
+        statement = select(Delivery).where(
+            Delivery.replayed_from_delivery_id == source_delivery_id,
+            Delivery.replay_idempotency_key == idempotency_key,
+        )
+        return (await self._session.execute(statement)).scalar_one_or_none()
+
+    async def get_latest(self, event_id: UUID, endpoint_id: UUID) -> Delivery | None:
+        statement = (
+            select(Delivery)
+            .where(
+                Delivery.event_id == event_id,
+                Delivery.endpoint_id == endpoint_id,
+            )
+            .order_by(Delivery.replay_generation.desc())
+            .limit(1)
+        )
+        return (await self._session.execute(statement)).scalar_one_or_none()
+
+    async def get_active(self, event_id: UUID, endpoint_id: UUID) -> Delivery | None:
+        statement = select(Delivery).where(
+            Delivery.event_id == event_id,
+            Delivery.endpoint_id == endpoint_id,
+            Delivery.status.in_(
+                (
+                    DeliveryStatus.PENDING,
+                    DeliveryStatus.IN_PROGRESS,
+                    DeliveryStatus.RETRY_WAIT,
+                )
+            ),
+        )
+        return (await self._session.execute(statement)).scalar_one_or_none()
 
     async def get_with_attempts(self, delivery_id: UUID) -> Delivery | None:
         """Load one delivery and its ordered timeline in a single SQL snapshot."""

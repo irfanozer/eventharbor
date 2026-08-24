@@ -80,6 +80,20 @@ class EventAcceptedResponse(BaseModel):
     created_at: datetime
 
 
+class ReplayAcceptedResponse(BaseModel):
+    """Identifiers for a newly accepted or previously accepted manual replay."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_delivery_id: UUID
+    delivery_id: UUID
+    event_id: UUID
+    endpoint_id: UUID
+    replay_generation: int
+    status: DeliveryStatus
+    created_at: datetime
+
+
 class DeliverySummaryResponse(BaseModel):
     """Current state of one event-to-endpoint delivery generation."""
 
@@ -88,6 +102,7 @@ class DeliverySummaryResponse(BaseModel):
     id: UUID
     endpoint_id: UUID
     replay_generation: int
+    replayed_from_delivery_id: UUID | None
     status: DeliveryStatus
     attempt_count: int
     next_attempt_at: datetime | None

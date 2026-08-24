@@ -112,7 +112,16 @@ class Delivery(Base):
     __tablename__ = "deliveries"
     __table_args__ = (
         UniqueConstraint("event_id", "endpoint_id", "replay_generation"),
+        UniqueConstraint("replayed_from_delivery_id", "replay_idempotency_key"),
         CheckConstraint("replay_generation >= 0", name="replay_generation_nonnegative"),
+        CheckConstraint(
+            "(replayed_from_delivery_id IS NULL) = (replay_idempotency_key IS NULL)",
+            name="replay_metadata_set_together",
+        ),
+        CheckConstraint(
+            "replay_idempotency_key IS NULL OR length(replay_idempotency_key) > 0",
+            name="replay_idempotency_key_not_empty",
+        ),
         CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
         CheckConstraint(
             "(lease_owner IS NULL) = (lease_expires_at IS NULL) "
@@ -135,6 +144,13 @@ class Delivery(Base):
         ),
         Index("ix_deliveries_expired_leases", "lease_expires_at"),
         Index("ix_deliveries_event_id_created_at", "event_id", "created_at"),
+        Index(
+            "uq_deliveries_one_active_per_event_endpoint",
+            "event_id",
+            "endpoint_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'in_progress', 'retry_wait')"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -145,6 +161,10 @@ class Delivery(Base):
         ForeignKey("endpoints.id", ondelete="RESTRICT"), nullable=False
     )
     replay_generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    replayed_from_delivery_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("deliveries.id", ondelete="RESTRICT")
+    )
+    replay_idempotency_key: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[DeliveryStatus] = mapped_column(
         SqlEnum(
             DeliveryStatus,
