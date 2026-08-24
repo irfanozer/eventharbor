@@ -18,8 +18,8 @@ class ReceiverMode(StrEnum):
 
 class ReceiverConfiguration(BaseModel):
     mode: ReceiverMode = ReceiverMode.SUCCESS
-    failures_before_success: int = Field(default=3, ge=0, le=20)
-    delay_ms: int = Field(default=5_000, ge=0, le=30_000)
+    failures_before_success: int = Field(default=0, ge=0, le=20)
+    delay_ms: int = Field(default=0, ge=0, le=30_000)
 
 
 class ReceiverState:
@@ -50,6 +50,18 @@ async def configure(configuration: ReceiverConfiguration) -> dict[str, object]:
         receiver.attempts = 0
         receiver.requests.clear()
     return {"configuration": configuration.model_dump(), "attempts": 0}
+
+
+@app.get("/control", tags=["receiver lab"])
+async def control_state() -> dict[str, object]:
+    """Expose bounded, non-secret evidence for the local Control Room."""
+
+    async with receiver.lock:
+        return {
+            "configuration": receiver.configuration.model_dump(),
+            "attempts": receiver.attempts,
+            "requests": list(receiver.requests[-20:]),
+        }
 
 
 @app.get("/requests", tags=["receiver lab"])

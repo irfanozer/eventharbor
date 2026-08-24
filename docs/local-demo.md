@@ -1,4 +1,4 @@
-# Local vertical-slice demo
+# Local EventHarbor demo
 
 This walkthrough proves both the normal path and the complete
 failure-repair-replay path:
@@ -17,14 +17,120 @@ From the repository root:
 docker compose up --build
 ```
 
-Wait until PostgreSQL and Receiver Lab are healthy, the migration process exits
-with code 0, and the API and worker are running. Leave this terminal open.
+Wait until PostgreSQL, Receiver Lab, API, and frontend are healthy, the migration
+process exits with code 0, and the worker is running. Leave this terminal open.
 
 If Windows already uses port `5432`, copy `.env.example` to `.env`, set
 `POSTGRES_PORT=55432`, and run the same command again. This only changes the
 Windows-to-container port; services still find the database at `postgres:5432`.
 
-## 2. Configure a successful receiver
+If port `3000` is in use, set `FRONTEND_PORT=3001` in `.env` and open
+`http://localhost:3001` instead.
+
+## 2. Run the recruiter-first one-click story
+
+Open <http://localhost:3000> and start the live recovery demo.
+
+One click starts the complete presentation. The Control Room finds or creates
+the built-in Receiver Lab endpoint, selects the deterministic dead-letter
+preset, and publishes a synthetic event with a unique idempotency key. These are
+real FastAPI calls that create PostgreSQL records. The worker then makes four
+real HTTP requests to Receiver Lab, and each receives `503`. The fourth failed
+attempt moves generation 0 to `dead_lettered` under the accelerated local retry
+policy.
+
+After the terminal state is visible through the query API, the guided demo acts
+as the presentation operator: it explicitly repairs Receiver Lab to return HTTP
+`200`, then explicitly approves an idempotent replay. The replay API appends
+generation 1; the worker sends it as a separate HTTP request and persists the
+`200` result as `delivered`.
+
+The final timeline must retain both sides of the proof:
+
+- Generation 0 remains `dead_lettered` with four completed HTTP `503` attempts.
+- Generation 1 is `delivered` with its own HTTP `200` attempt.
+- The immutable event and original failure evidence were not reset, moved, or
+  deleted during recovery.
+
+The one-click sequence is presentation orchestration, not a production
+auto-replay policy. It waits for persisted terminal evidence and then issues the
+same distinct repair and explicit replay commands exposed to an operator.
+
+### Secondary operator mode
+
+Use operator mode when you want to control the recovery boundary yourself. The
+system performs the same real publish, delivery, retry, and dead-letter work but
+pauses at generation 0. Inspect the four `503` attempts, choose **Repair
+receiver**, review the replay action, and choose **Approve replay**. Repairing
+the receiver alone never changes the dead-lettered delivery; only the separate
+replay approval creates generation 1.
+
+You can continue exploring through the top navigation:
+
+- **Events** lists recent events and their latest delivery state.
+- **Dead letters** contains only latest generations that still need action.
+- **Endpoints** shows safe Receiver Lab metadata without a signing secret.
+
+The interface uses relative `/api` requests. Nginx proxies those requests to
+FastAPI inside Compose, so the browser only communicates with
+`http://localhost:3000` during the guided flow.
+
+### Public multi-visitor caveat
+
+Receiver Lab has one process-wide, in-memory configuration. If two public
+visitors run the demo concurrently, one visitor's failure or success preset can
+affect the other's HTTP outcomes. Event and attempt records still have distinct
+database IDs, but the receiver behavior is not session-isolated. Run the
+current demo with one visitor at a time. A public multi-visitor deployment needs
+per-session Receiver Lab instances/state or serialized demo sessions.
+
+## 3. Service addresses and troubleshooting
+
+- Control Room: <http://localhost:3000>
+- API health: <http://localhost:8000/health>
+- API documentation: <http://localhost:8000/docs>
+- Receiver Lab health: <http://localhost:8100/health>
+- Receiver Lab documentation: <http://localhost:8100/docs>
+
+Check service state with:
+
+```powershell
+docker compose ps
+```
+
+Follow API and worker output with:
+
+```powershell
+docker compose logs -f api worker
+```
+
+Stop the stack with `docker compose down`. PostgreSQL data stays in the named
+volume, so events remain available on the next start.
+
+## 4. Frontend development with hot reload
+
+Run the backend services in one terminal:
+
+```powershell
+docker compose up postgres migrate api worker receiver-lab
+```
+
+Run Vite in a second terminal:
+
+```powershell
+cd frontend
+npm ci
+npm run dev
+```
+
+Open <http://localhost:5173>. Vite proxies `/api/*` to
+`http://localhost:8000/*`, matching the Nginx behavior in the complete stack.
+
+## 5. Optional API-only walkthrough
+
+The remaining steps prove the same behavior directly through HTTP calls.
+
+### 5.1 Configure a successful receiver
 
 Open a second PowerShell terminal in the repository root:
 
@@ -42,7 +148,7 @@ Invoke-RestMethod `
   -Body $receiverConfiguration
 ```
 
-## 3. Register Receiver Lab
+### 5.2 Register Receiver Lab
 
 ```powershell
 $endpointRequest = @{
@@ -62,7 +168,7 @@ $endpoint
 The response includes a signing secret because this local milestone shows the
 secret once at creation. Do not use this storage design in production.
 
-## 4. Publish an event
+### 5.3 Publish an event
 
 ```powershell
 $eventRequest = @{
@@ -88,7 +194,7 @@ The API returns `202` only after the event and its initial delivery are
 committed together. Repeating the same request and idempotency key returns the
 same event. Reusing the key with different data returns `409`.
 
-## 5. Inspect delivery evidence
+### 5.4 Inspect delivery evidence
 
 Wait one second for the worker, then run:
 
@@ -114,11 +220,12 @@ and `request_fingerprint_sha256`, the separate value used for idempotency.
 Swagger is also available at <http://localhost:8000/docs> and
 <http://localhost:8100/docs>.
 
-## 6. Force a terminal failure
+### 5.5 Force a terminal failure
 
-Change Receiver Lab to return a permanent HTTP `400` response. A permanent
-failure is useful here because it reaches the dead-letter state deterministically
-without waiting through the retry schedule.
+Change Receiver Lab to return a permanent HTTP `400` response. This optional
+API-only walkthrough takes a shorter terminal path so the commands remain
+compact; the recruiter-first browser story deliberately uses four HTTP `503`
+attempts to demonstrate the retry policy before dead-lettering.
 
 ```powershell
 $failingReceiver = @{
@@ -166,7 +273,7 @@ $sourceAttemptsBeforeReplay | ConvertTo-Json -Depth 10
 The source delivery should now be `dead_lettered` with one completed,
 terminal-failure attempt containing HTTP `400`.
 
-## 7. Repair the receiver and approve replay
+### 5.6 Repair the receiver and approve replay
 
 Repairing the destination does not mutate the dead-lettered delivery. The
 manual replay request creates generation 1 as a new pending delivery.
@@ -203,7 +310,7 @@ $sameReplay
 Both responses should contain the same `delivery_id` and
 `replay_generation: 1`.
 
-## 8. Prove the replay succeeded without erasing history
+### 5.7 Prove the replay succeeded without erasing history
 
 ```powershell
 do {

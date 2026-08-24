@@ -110,3 +110,21 @@ def test_event_hash_columns_have_independent_length_constraints() -> None:
 
     assert "ck_events_request_fingerprint_sha256_length" in event_checks
     assert "ck_events_payload_sha256_length" in event_checks
+
+
+def test_control_room_sort_and_filter_indexes_match_query_contract() -> None:
+    endpoint_index = next(
+        index for index in Endpoint.__table__.indexes if index.name == "ix_endpoints_created_at_id"
+    )
+    event_index = next(
+        index for index in Event.__table__.indexes if index.name == "ix_events_created_at_id"
+    )
+    delivery_index = next(
+        index
+        for index in Delivery.__table__.indexes
+        if index.name == "ix_deliveries_status_updated_at_id"
+    )
+
+    assert [column.name for column in endpoint_index.columns] == ["created_at", "id"]
+    assert [column.name for column in event_index.columns] == ["created_at", "id"]
+    assert [column.name for column in delivery_index.columns] == ["status", "updated_at", "id"]

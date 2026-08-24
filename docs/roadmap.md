@@ -28,11 +28,11 @@
 
 ## Milestone 4: recruiter demo
 
-- React Control Room
-- Live attempt timeline
-- Seeded failure presets
-- Event, endpoint, and dead-letter pages
-- Ninety-second scripted demonstration
+- [x] React Control Room
+- [x] Live attempt timeline
+- [x] Seeded failure presets through a constrained API facade
+- [x] Event, endpoint, and dead-letter pages
+- [x] Ninety-second failure, repair, and replay demonstration
 
 ## Milestone 5: security and operations
 

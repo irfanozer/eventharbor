@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     database_max_overflow: int = Field(default=10, ge=0, le=100)
     database_pool_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     receiver_lab_url: str = "http://receiver-lab:8100/webhooks"
+    receiver_lab_control_url: str = "http://receiver-lab:8100"
     worker_poll_interval_seconds: float = Field(default=0.5, gt=0, le=60)
     worker_http_timeout_seconds: float = Field(default=5.0, gt=0, le=120)
     worker_lease_seconds: float = Field(default=30.0, gt=0, le=600)

@@ -51,6 +51,7 @@ class Endpoint(Base):
         CheckConstraint("octet_length(signing_secret) > 0", name="signing_secret_not_empty"),
         CheckConstraint("secret_version >= 1", name="secret_version_positive"),
         Index("ix_endpoints_enabled_created_at", "enabled", "created_at"),
+        Index("ix_endpoints_created_at_id", "created_at", "id"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -86,6 +87,7 @@ class Event(Base):
         ),
         CheckConstraint("length(payload_sha256) = 64", name="payload_sha256_length"),
         Index("ix_events_event_type_created_at", "event_type", "created_at"),
+        Index("ix_events_created_at_id", "created_at", "id"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -144,6 +146,7 @@ class Delivery(Base):
         ),
         Index("ix_deliveries_expired_leases", "lease_expires_at"),
         Index("ix_deliveries_event_id_created_at", "event_id", "created_at"),
+        Index("ix_deliveries_status_updated_at_id", "status", "updated_at", "id"),
         Index(
             "uq_deliveries_one_active_per_event_endpoint",
             "event_id",

@@ -19,7 +19,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 V1 = "20260823_0001"
 V2 = "20260823_0002"
 V3 = "20260823_0003"
-HEAD = "20260823_0004"
+V4 = "20260823_0004"
+HEAD = "20260824_0005"
 
 ENDPOINT_ID = UUID("00000000-0000-0000-0000-000000000101")
 EVENT_ID = UUID("00000000-0000-0000-0000-000000000102")
@@ -335,6 +336,49 @@ async def test_data_bearing_migrations_round_trip(
         assert "pending" in active_index["indexdef"]
         assert "in_progress" in active_index["indexdef"]
         assert "retry_wait" in active_index["indexdef"]
+
+        control_room_indexes = await _rows(
+            database_url,
+            """
+            SELECT tablename, indexname, indexdef
+            FROM pg_indexes
+            WHERE schemaname = current_schema()
+              AND indexname IN (
+                'ix_events_created_at_id',
+                'ix_endpoints_created_at_id',
+                'ix_deliveries_status_updated_at_id'
+              )
+            ORDER BY indexname
+            """,
+            {},
+        )
+        assert [(row["tablename"], row["indexname"]) for row in control_room_indexes] == [
+            ("deliveries", "ix_deliveries_status_updated_at_id"),
+            ("endpoints", "ix_endpoints_created_at_id"),
+            ("events", "ix_events_created_at_id"),
+        ]
+        assert "status, updated_at, id" in control_room_indexes[0]["indexdef"]
+        assert "created_at, id" in control_room_indexes[1]["indexdef"]
+        assert "created_at, id" in control_room_indexes[2]["indexdef"]
+
+        _alembic(database_url, "downgrade", V4)
+        indexes_after_control_room_downgrade = await _rows(
+            database_url,
+            """
+            SELECT indexname
+            FROM pg_indexes
+            WHERE schemaname = current_schema()
+              AND indexname IN (
+                'ix_events_created_at_id',
+                'ix_endpoints_created_at_id',
+                'ix_deliveries_status_updated_at_id'
+              )
+            """,
+            {},
+        )
+        assert indexes_after_control_room_downgrade == []
+
+        _alembic(database_url, "upgrade", HEAD)
 
         _alembic(database_url, "downgrade", V3)
         deliveries_at_v3 = await _rows(

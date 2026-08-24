@@ -5,18 +5,40 @@ import pytest
 from fastapi import Response
 
 from eventharbor.config import Settings
+from eventharbor.control_room import (
+    ControlRoomQueryService,
+    DeadLetterRecord,
+    EventListRecord,
+    OverviewSnapshot,
+    Page,
+)
 from eventharbor.deliveries.retry import DeliveryDisposition
 from eventharbor.deliveries.state_machine import DeliveryAttemptStatus, DeliveryStatus
+from eventharbor.demo import ReceiverLabDemoService
 from eventharbor.errors import DomainError
 from eventharbor.models import Delivery, DeliveryAttempt, Endpoint, Event
 from eventharbor.routers.v1 import (
+    configure_receiver_lab,
     create_endpoint,
+    get_control_room_overview,
     get_delivery_attempts,
+    get_endpoint,
     get_event,
+    get_receiver_lab_state,
+    list_dead_letters,
+    list_endpoints,
+    list_events,
     publish_event,
     replay_delivery,
 )
-from eventharbor.schemas import EndpointCreateRequest, EventPublishRequest
+from eventharbor.schemas import (
+    EndpointCreateRequest,
+    EventPublishRequest,
+    ReceiverLabConfigurationResponse,
+    ReceiverLabPreset,
+    ReceiverLabPresetRequest,
+    ReceiverLabStateResponse,
+)
 from eventharbor.services import (
     CreatedEndpoint,
     DeliveryAttempts,
@@ -226,3 +248,185 @@ async def test_query_routes_render_events_and_attempts(monkeypatch) -> None:
     assert attempts_response.delivery.id == delivery.id
     assert attempts_response.attempts[0].status == DeliveryAttemptStatus.COMPLETED
     assert attempts_response.attempts[0].http_status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_control_room_overview_maps_all_statuses_and_disables_cache(monkeypatch) -> None:
+    now = datetime.now(UTC)
+
+    async def fake_overview(service):
+        return OverviewSnapshot(
+            generated_at=now,
+            events_total=12,
+            endpoints_total=3,
+            endpoints_enabled=2,
+            deliveries_by_status={
+                DeliveryStatus.PENDING: 2,
+                DeliveryStatus.RETRY_WAIT: 4,
+                DeliveryStatus.DEAD_LETTERED: 1,
+            },
+            actionable_dead_letters=1,
+        )
+
+    monkeypatch.setattr(ControlRoomQueryService, "overview", fake_overview)
+    response = Response()
+
+    result = await get_control_room_overview(response, Session())
+
+    assert response.headers["Cache-Control"] == "no-store"
+    assert result.generated_at == now
+    assert result.events_total == 12
+    assert result.deliveries.model_dump() == {
+        "pending": 2,
+        "in_progress": 0,
+        "retry_wait": 4,
+        "delivered": 0,
+        "dead_lettered": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_control_room_event_list_maps_latest_generation_without_secrets(monkeypatch) -> None:
+    endpoint, event, delivery, _ = objects()
+    delivery.replay_generation = 2
+
+    async def fake_events(service, **kwargs):
+        assert kwargs == {
+            "limit": 10,
+            "cursor": "opaque",
+            "event_type": "test.event",
+            "endpoint_id": endpoint.id,
+            "delivery_status": DeliveryStatus.PENDING,
+        }
+        return Page(
+            items=[EventListRecord(event=event, latest_delivery=delivery, endpoint=endpoint)],
+            next_cursor="next-page",
+        )
+
+    monkeypatch.setattr(ControlRoomQueryService, "events", fake_events)
+    response = Response()
+
+    result = await list_events(
+        response,
+        Session(),
+        limit=10,
+        cursor="opaque",
+        event_type="test.event",
+        endpoint_id=endpoint.id,
+        delivery_status=DeliveryStatus.PENDING,
+    )
+
+    assert response.headers["Cache-Control"] == "no-store"
+    assert result.next_cursor == "next-page"
+    assert result.items[0].id == event.id
+    assert result.items[0].generation_count == 3
+    assert result.items[0].endpoint.url == endpoint.target_url
+    assert "signing_secret" not in result.items[0].endpoint.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_control_room_endpoint_list_and_detail_never_expose_secret(monkeypatch) -> None:
+    endpoint, _, _, _ = objects()
+
+    async def fake_endpoints(service, **kwargs):
+        assert kwargs == {"limit": 8, "cursor": None}
+        return Page(items=[endpoint], next_cursor=None)
+
+    async def fake_endpoint(service, endpoint_id):
+        assert endpoint_id == endpoint.id
+        return endpoint
+
+    monkeypatch.setattr(ControlRoomQueryService, "endpoints", fake_endpoints)
+    monkeypatch.setattr(ControlRoomQueryService, "endpoint", fake_endpoint)
+    list_response = Response()
+    detail_response = Response()
+
+    endpoint_page = await list_endpoints(list_response, Session(), limit=8, cursor=None)
+    endpoint_detail = await get_endpoint(endpoint.id, detail_response, Session())
+
+    assert list_response.headers["Cache-Control"] == "no-store"
+    assert detail_response.headers["Cache-Control"] == "no-store"
+    assert endpoint_page.items[0] == endpoint_detail
+    assert endpoint_detail.url == endpoint.target_url
+    assert "signing_secret" not in endpoint_detail.model_dump()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enabled", "replayable", "blocked_reason"),
+    [(True, True, None), (False, False, "Endpoint is disabled.")],
+)
+async def test_dead_letter_list_explains_replay_eligibility(
+    monkeypatch,
+    enabled: bool,
+    replayable: bool,
+    blocked_reason: str | None,
+) -> None:
+    endpoint, event, delivery, _ = objects()
+    endpoint.enabled = enabled
+    delivery.status = DeliveryStatus.DEAD_LETTERED
+    delivery.next_attempt_at = None
+
+    async def fake_dead_letters(service, **kwargs):
+        assert kwargs == {"limit": 25, "cursor": None, "endpoint_id": endpoint.id}
+        return Page(
+            items=[DeadLetterRecord(event=event, delivery=delivery, endpoint=endpoint)],
+            next_cursor=None,
+        )
+
+    monkeypatch.setattr(ControlRoomQueryService, "dead_letters", fake_dead_letters)
+    response = Response()
+
+    result = await list_dead_letters(
+        response,
+        Session(),
+        limit=25,
+        cursor=None,
+        endpoint_id=endpoint.id,
+    )
+
+    assert response.headers["Cache-Control"] == "no-store"
+    assert result.items[0].event_id == event.id
+    assert result.items[0].replayable is replayable
+    assert result.items[0].blocked_reason == blocked_reason
+
+
+def receiver_state(preset: ReceiverLabPreset) -> ReceiverLabStateResponse:
+    return ReceiverLabStateResponse(
+        preset=preset,
+        configuration=ReceiverLabConfigurationResponse(
+            mode="success",
+            failures_before_success=0,
+            delay_ms=0,
+        ),
+        attempts=0,
+        requests=[],
+    )
+
+
+@pytest.mark.asyncio
+async def test_receiver_lab_facade_routes_map_state_and_disable_cache(monkeypatch) -> None:
+    async def fake_state(service):
+        return receiver_state(ReceiverLabPreset.SUCCESS)
+
+    async def fake_configure(service, preset):
+        assert preset is ReceiverLabPreset.DEAD_LETTER
+        return receiver_state(preset)
+
+    monkeypatch.setattr(ReceiverLabDemoService, "state", fake_state)
+    monkeypatch.setattr(ReceiverLabDemoService, "configure", fake_configure)
+    settings = Settings(_env_file=None)
+    get_response = Response()
+    put_response = Response()
+
+    read_result = await get_receiver_lab_state(get_response, settings)
+    configured_result = await configure_receiver_lab(
+        ReceiverLabPresetRequest(preset=ReceiverLabPreset.DEAD_LETTER),
+        put_response,
+        settings,
+    )
+
+    assert get_response.headers["Cache-Control"] == "no-store"
+    assert put_response.headers["Cache-Control"] == "no-store"
+    assert read_result.preset is ReceiverLabPreset.SUCCESS
+    assert configured_result.preset is ReceiverLabPreset.DEAD_LETTER

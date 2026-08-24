@@ -39,8 +39,8 @@ Their questions are operational:
 
 ## Public demonstration
 
-The public demo opens directly to a seeded Control Room without a registration
-wall. Visitors publish synthetic events only to the built-in Receiver Lab. The
+The demo opens directly to a guided Control Room without a registration wall.
+Visitors publish synthetic events only to the built-in Receiver Lab. The
 lab can return `200`, fail a deterministic number of times with `503`, return
 `429` with `Retry-After`, exceed the request timeout, or return a permanent
 `400`.

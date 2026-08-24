@@ -47,6 +47,7 @@ services:
       EVENTHARBOR_ENVIRONMENT: local
       EVENTHARBOR_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-eventharbor}:${POSTGRES_PASSWORD:-eventharbor}@postgres:5432/${POSTGRES_DB:-eventharbor}
       EVENTHARBOR_RECEIVER_LAB_URL: http://receiver-lab:8100/webhooks
+      EVENTHARBOR_RECEIVER_LAB_CONTROL_URL: http://receiver-lab:8100
       PYTHONPATH: /app/src
     ports:
       - "8000:8000"
@@ -55,6 +56,19 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      receiver-lab:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   worker:
     build:
@@ -65,6 +79,12 @@ services:
       EVENTHARBOR_ENVIRONMENT: local
       EVENTHARBOR_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-eventharbor}:${POSTGRES_PASSWORD:-eventharbor}@postgres:5432/${POSTGRES_DB:-eventharbor}
       EVENTHARBOR_RECEIVER_LAB_URL: http://receiver-lab:8100/webhooks
+      # Fast local feedback for the scripted demo. Production defaults remain
+      # 8 attempts, 10-second base delay, and one-hour delay/cap ceilings.
+      EVENTHARBOR_WORKER_MAX_ATTEMPTS: ${EVENTHARBOR_WORKER_MAX_ATTEMPTS:-4}
+      EVENTHARBOR_WORKER_BASE_DELAY_SECONDS: ${EVENTHARBOR_WORKER_BASE_DELAY_SECONDS:-1}
+      EVENTHARBOR_WORKER_MAX_DELAY_SECONDS: ${EVENTHARBOR_WORKER_MAX_DELAY_SECONDS:-2}
+      EVENTHARBOR_WORKER_RETRY_AFTER_CAP_SECONDS: ${EVENTHARBOR_WORKER_RETRY_AFTER_CAP_SECONDS:-2}
       PYTHONPATH: /app/src
     volumes:
       - ./backend/src:/app/src
@@ -106,6 +126,20 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
 volumes:
   eventharbor-postgres:

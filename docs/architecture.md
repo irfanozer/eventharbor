@@ -3,21 +3,26 @@
 ## Initial topology
 
 ```text
-Publisher
-    |
-    v
-FastAPI API -----> PostgreSQL <----- Delivery worker
-                       |                    |
-                       |                    v
-                       |             Receiver Lab / verified endpoint
-                       |                    |
-                       +<---- attempt ------+
-
-React dashboard -----> FastAPI query APIs
+Browser -----> Nginx frontend :3000
+                  |       |
+          static SPA      +---- /api/* ----> FastAPI API :8000
+                                               |        |
+Publisher -------------------------------------+        +----> Receiver Lab control
+                                               |
+                                               v
+                                           PostgreSQL
+                                               ^
+                                               |
+                                        Delivery worker ----> Receiver Lab webhook
+                                               |
+                                               +---- persisted attempt evidence
 ```
 
-The API and worker are separate process modes built from the same backend
-artifact. PostgreSQL is the source of truth and initial durable scheduler.
+The Nginx frontend serves the React single-page application and proxies its
+relative `/api` requests to FastAPI. The same path is provided by Vite during
+frontend development. FastAPI does not require a permissive cross-origin
+policy. The API and worker are separate process modes built from the same
+backend artifact. PostgreSQL is the source of truth and initial durable scheduler.
 Workers claim due delivery rows with short leases and `FOR UPDATE SKIP LOCKED`,
 reserve an `in_progress` attempt in the same transaction, then perform network
 I/O without holding the row lock. The result resolves that reserved row and the
@@ -69,6 +74,21 @@ caller-supplied `Idempotency-Key` makes retries of the replay request safe. The
 event lock, replay metadata constraints, and a partial unique index over active
 event-endpoint deliveries prevent concurrent replay requests from creating two
 active generations.
+
+## Control Room read model
+
+The Control Room uses bounded, cursor-paginated query routes for events,
+endpoints, and actionable dead letters. Event lists report the latest delivery
+generation; event detail preserves and returns every generation. A dead letter
+drops out of the actionable list only after a newer replay generation exists.
+
+Receiver Lab is controlled through a narrow FastAPI facade that accepts named
+presets. The browser cannot submit an arbitrary receiver URL or raw failure
+configuration. Endpoint query responses omit signing secrets, and the browser
+does not retain the one-time secret returned during local endpoint creation.
+
+See [`control-room.md`](control-room.md) for browser routes, API routes, and the
+guided failure-repair-replay sequence.
 
 ## Planned expansion
 

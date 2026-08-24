@@ -63,3 +63,34 @@ async def test_receiver_health_reports_service_identity() -> None:
 
     assert response.status_code == 200
     assert response.json()["service"] == "eventharbor-receiver-lab"
+
+
+@pytest.mark.asyncio
+async def test_receiver_control_get_returns_configuration_and_last_twenty_requests() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        configured = await client.put(
+            "/control",
+            json={"mode": "permanent_failure", "failures_before_success": 0, "delay_ms": 0},
+        )
+        assert configured.status_code == 200
+        for attempt in range(23):
+            await client.post(
+                "/webhooks",
+                content=f'{{"attempt":{attempt}}}',
+                headers={"X-EventHarbor-Event-Id": f"evt-{attempt}"},
+            )
+
+        response = await client.get("/control")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["configuration"] == {
+        "mode": "permanent_failure",
+        "failures_before_success": 0,
+        "delay_ms": 0,
+    }
+    assert payload["attempts"] == 23
+    assert len(payload["requests"]) == 20
+    assert payload["requests"][0]["attempt"] == 4
+    assert payload["requests"][-1]["event_id"] == "evt-22"

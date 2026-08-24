@@ -10,17 +10,15 @@ failures, and dead-letters exhausted deliveries. If a worker crashes during the
 indeterminate window around an HTTP request, its expired lease is resolved and
 the event is redelivered while the configured attempt budget remains.
 
-> Project status: first vertical slice complete. PostgreSQL persistence,
-> idempotent ingestion, signed delivery, retry scheduling, attempt evidence,
-> expired-lease crash recovery, Docker orchestration, and a real PostgreSQL
-> integration test are implemented. Operator-approved, idempotent manual replay
-> is also implemented. Workspace isolation and the React Control Room remain
-> explicit future milestones.
+> Project status: reliability engine and recruiter demo complete. PostgreSQL
+> persistence, idempotent ingestion, signed delivery, retry scheduling, attempt
+> evidence, expired-lease crash recovery, and operator-approved replay are
+> visible through the React Control Room. Workspace isolation, production
+> security hardening, observability, and cloud delivery remain future milestones.
 
 ## Target signature demonstration
 
-The finished public demo is designed around one inspectable
-failure-and-recovery story:
+The Control Room is designed around one inspectable failure-and-recovery story:
 
 ```text
 Publish event
@@ -32,10 +30,9 @@ Publish event
   -> the signed delivery succeeds
 ```
 
-The current vertical slice proves durable publish, signed delivery, retries,
-dead-letter transitions, lease recovery, persisted attempt evidence, and
-operator-approved replay through the API and automated tests. The browser
-Control Room still needs to be added before the full story has a visual UI.
+The demo uses real API mutations, worker attempts, and PostgreSQL state. The
+failed generation remains visible after replay, so the success does not erase
+the evidence that preceded it.
 
 ## Reliability contract
 
@@ -54,21 +51,23 @@ The core guarantees and limitations are documented in
 - PostgreSQL is the authoritative store and durable work scheduler.
 - SQLAlchemy and Alembic provide typed persistence and versioned migrations.
 - HTTPX sends exact, HMAC-signed webhook bytes without following redirects.
-- Docker Compose starts PostgreSQL, migrations, API, worker, and Receiver Lab.
-- React, OpenTelemetry, Azure, Key Vault, and Terraform are later milestones.
+- React, TypeScript, and Vite power the browser Control Room.
+- Nginx serves the production frontend and proxies same-origin `/api` requests.
+- Docker Compose starts PostgreSQL, migrations, API, worker, Receiver Lab, and
+  the frontend.
+- OpenTelemetry, Azure, Key Vault, and Terraform are later milestones.
 
 The initial system is a modular monolith with independent API and worker
 processes. It deliberately avoids Kafka, Kubernetes, and premature
 microservices. See [`docs/architecture.md`](docs/architecture.md).
 
-## Local vertical slice
+## Run the complete local demo
 
 Prerequisites:
 
 - Docker Desktop with Docker Compose, or Python 3.12+
 
-Start PostgreSQL, apply migrations, then run the API, worker, and deterministic
-Receiver Lab:
+Start the complete stack:
 
 ```bash
 docker compose up --build
@@ -76,15 +75,21 @@ docker compose up --build
 
 Then visit:
 
+- Control Room: <http://localhost:3000>
 - API health: <http://localhost:8000/health>
 - API documentation: <http://localhost:8000/docs>
 - Receiver Lab health: <http://localhost:8100/health>
 - Receiver Lab documentation: <http://localhost:8100/docs>
 
-Follow [`docs/local-demo.md`](docs/local-demo.md) to register the local
-destination, publish an idempotent event, inspect its persisted attempt, force a
-dead letter, repair the receiver, and replay the delivery without erasing its
-original history.
+In the Control Room, choose **Run reliability story**. Watch the real attempts
+reach a dead letter, choose **Repair receiver**, then choose **Approve replay**.
+Generation 0 remains failed while generation 1 succeeds. The full path normally
+takes less than 90 seconds with the intentionally accelerated local retry
+policy.
+
+Follow [`docs/local-demo.md`](docs/local-demo.md) for the walkthrough and
+troubleshooting. [`docs/control-room.md`](docs/control-room.md) explains the UI,
+routes, API contract, retry policy, and delivery shape.
 
 If port `5432` is already used by PostgreSQL on your machine, create `.env` and
 set `POSTGRES_PORT=55432`. Container-to-container connections still use
@@ -103,11 +108,25 @@ mypy src
 pytest
 ```
 
+Run the frontend checks:
+
+```bash
+cd frontend
+npm ci
+npm run typecheck
+npm test
+npm run build
+```
+
+For Vite development with hot reload, leave the backend services running and
+use `npm run dev`, then open <http://localhost:5173>. Both Vite and Nginx proxy
+relative `/api` requests to FastAPI.
+
 ## Repository map
 
 ```text
 backend/                 FastAPI applications and delivery-domain code
-frontend/                React Control Room placeholder (Milestone 4)
+frontend/                React Control Room and Nginx container
 docs/                    Product, architecture, guarantees, and decisions
 docs/adr/                Architecture decision records
 infra/                   Azure infrastructure (later milestone)
@@ -120,7 +139,7 @@ compose.yaml             Local services
 1. Foundation: reliability contract, state machine, retry policy, signing, CI
 2. Vertical slice: register endpoint, publish event, persist, deliver, record attempt
 3. Reliability: leases, idempotency, retries, dead letters, replay, crash recovery
-4. Demo: live control room, deterministic failure controls, attempt timeline
+4. Demo: live control room, deterministic failure controls, attempt timeline (complete)
 5. Security: tenant isolation, API keys, secret rotation, endpoint verification, SSRF controls
 6. Operations: OpenTelemetry, dashboards, alerts, load and recovery reports
 7. Cloud: Azure deployment and Terraform
