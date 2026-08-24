@@ -27,12 +27,40 @@ Windows-to-container port; services still find the database at `postgres:5432`.
 If port `3000` is in use, set `FRONTEND_PORT=3001` in `.env` and open
 `http://localhost:3001` instead.
 
-## 2. Run the recruiter-first one-click story
+## 2. Run the recruiter-first event journey
 
-Open <http://localhost:3000> and start the live recovery demo.
+Open <http://localhost:3000>. Choose one Receiver Lab incident, edit the example
+order ID, amount, or note if you want, then choose **Send this event and watch it
+move**.
 
-One click starts the complete presentation. The Control Room finds or creates
-the built-in Receiver Lab endpoint, selects the deterministic dead-letter
+The page collapses the input form and keeps the same event inside one live panel.
+Read the large **NOW** status first, then follow the highlighted fixed route:
+
+```text
+Browser -> EventHarbor API -> PostgreSQL -> delivery worker -> Receiver Lab
+```
+
+The compact history shows every actual response from PostgreSQL attempt rows.
+The dark exchange card makes the latest destination, request number, response,
+duration, and independent Receiver Lab receipt visually dominant.
+
+Available incidents are:
+
+- **Destination outage:** `503, 503, 503, 503`, stop, repair, then generation 1
+  receives `200`.
+- **Brief service outage:** `503, 503, 200`; generation 0 recovers automatically.
+- **API rate limit:** `429, 429, 200`; the first two responses include
+  `Retry-After: 2` and the worker waits accordingly.
+- **Invalid request:** one `400`; the worker classifies it as permanent and does
+  not make pointless retries.
+
+The default destination-outage choice starts the complete recovery presentation.
+The order is synthetic, but the
+network and persistence path is real. The browser makes a live request through
+Nginx to FastAPI; FastAPI commits the event and its first delivery to PostgreSQL;
+the worker reads that delivery and makes actual HTTP requests to the separate
+Receiver Lab service. The Control Room finds or creates the built-in Receiver
+Lab endpoint, selects the deterministic dead-letter
 preset, and publishes a synthetic event with a unique idempotency key. These are
 real FastAPI calls that create PostgreSQL records. The worker then makes four
 real HTTP requests to Receiver Lab, and each receives `503`. The fourth failed
@@ -51,6 +79,20 @@ The final timeline must retain both sides of the proof:
 - Generation 1 is `delivered` with its own HTTP `200` attempt.
 - The immutable event and original failure evidence were not reset, moved, or
   deleted during recovery.
+
+The live journey is the fastest recruiter walkthrough. Read it in this order:
+
+1. **Where it is now:** the dominant status and highlighted route node.
+2. **What happened so far:** the compact generation 0 and generation 1 chips.
+3. **What crossed the network:** the latest real HTTP exchange and receiver URL.
+4. **Why it is credible:** EventHarbor's attempt and Receiver Lab's
+   independently captured receipt have matching event IDs, delivery IDs, attempt
+   numbers, and exact-body SHA-256 values.
+5. **Optional engineering depth:** expand exact canonical JSON, every HTTP
+   attempt, or complete PostgreSQL lineage only when needed.
+
+Receiver Lab records that a signature header arrived; it does not currently
+verify the signature, and the interface does not claim that it does.
 
 The one-click sequence is presentation orchestration, not a production
 auto-replay policy. It waits for persisted terminal evidence and then issues the
@@ -75,14 +117,14 @@ The interface uses relative `/api` requests. Nginx proxies those requests to
 FastAPI inside Compose, so the browser only communicates with
 `http://localhost:3000` during the guided flow.
 
-### Public multi-visitor caveat
+### Concurrent visitor isolation
 
-Receiver Lab has one process-wide, in-memory configuration. If two public
-visitors run the demo concurrently, one visitor's failure or success preset can
-affect the other's HTTP outcomes. Event and attempt records still have distinct
-database IDs, but the receiver behavior is not session-isolated. Run the
-current demo with one visitor at a time. A public multi-visitor deployment needs
-per-session Receiver Lab instances/state or serialized demo sessions.
+Every browser run carries a safe run ID from its editable event payload to the
+worker and Receiver Lab. Receiver presets, counters, and receipts are stored per
+run, so concurrent visitors cannot repair or exhaust each other's scenario.
+Receiver Lab bounds this in-memory demo state to 100 recently used runs and 100
+receipts per run; PostgreSQL event, delivery, and attempt records remain durable
+independently of that bounded presentation evidence.
 
 ## 3. Service addresses and troubleshooting
 
@@ -224,8 +266,9 @@ Swagger is also available at <http://localhost:8000/docs> and
 
 Change Receiver Lab to return a permanent HTTP `400` response. This optional
 API-only walkthrough takes a shorter terminal path so the commands remain
-compact; the recruiter-first browser story deliberately uses four HTTP `503`
-attempts to demonstrate the retry policy before dead-lettering.
+compact; the browser's default destination-outage scenario uses four HTTP `503`
+attempts to demonstrate the retry policy before dead-lettering, while the
+permanent-rejection scenario exposes this same one-request classification visually.
 
 ```powershell
 $failingReceiver = @{

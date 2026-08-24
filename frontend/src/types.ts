@@ -13,9 +13,23 @@ export type ReceiverLabPreset =
   | "success"
   | "retry_then_recover"
   | "rate_limited"
+  | "rate_limit_then_recover"
   | "timeout"
   | "permanent_failure"
   | "dead_letter";
+
+export type DemoScenarioId =
+  | "outage_replay"
+  | "transient_recovery"
+  | "rate_limit_recovery"
+  | "permanent_rejection";
+
+/** Editable business data used by the recruiter-facing reliability story. */
+export interface DemoEventPayload {
+  order_id: string;
+  amount_cents: number;
+  note: string;
+}
 
 export interface Endpoint {
   id: string;
@@ -131,10 +145,23 @@ export interface DeadLetterListResponse {
 }
 
 export interface ReceiverLabRequest {
+  /** Monotonic position in Receiver Lab's evidence log, across scenario changes. */
+  sequence: number;
+  /** Attempt number within the receiver's current deterministic scenario. */
   attempt: number;
   event_id: string | null;
+  delivery_id: string | null;
+  event_type: string | null;
+  /** Attempt number supplied by the EventHarbor worker. */
+  delivery_attempt: number | null;
+  /** Epoch seconds included in the signed EventHarbor request. */
+  request_timestamp: number | null;
+  received_at: string;
+  response_status_code: number;
+  receiver_mode: string;
   signature_present: boolean;
   body_preview: string;
+  body_sha256: string;
 }
 
 export interface ReceiverLabState {
@@ -175,4 +202,3 @@ export interface ProblemDetails {
   instance?: string;
   code?: string;
 }
-

@@ -25,8 +25,8 @@ function DeliveryGeneration({ delivery }: { delivery: Delivery }) {
     <article className={`delivery-generation generation-${delivery.status}`}>
       <header>
         <div>
-          <span className="generation-label">Generation {delivery.replay_generation}</span>
-          <p>{delivery.replay_generation === 0 ? "Original delivery" : "Operator-approved replay"}</p>
+          <span className="generation-label">{delivery.replay_generation === 0 ? "Original delivery" : "Recovery replay"}</span>
+          <p>{delivery.replay_generation === 0 ? "Created when the event was accepted" : "Created separately after the original delivery stopped"}</p>
         </div>
         <StatusPill status={delivery.status} />
       </header>
@@ -43,7 +43,7 @@ function DeliveryGeneration({ delivery }: { delivery: Delivery }) {
       {attempts.isError ? <ErrorState error={attempts.error} retry={() => void attempts.refetch()} /> : null}
       {attempts.data ? (
         attempts.data.attempts.length ? (
-          <ol className="attempt-timeline" aria-label={`Generation ${delivery.replay_generation} attempts`}>
+          <ol className="attempt-timeline" aria-label={`${delivery.replay_generation === 0 ? "Original delivery" : "Recovery replay"} attempts`}>
             {attempts.data.attempts.map((attempt) => (
               <li key={attempt.id}>
                 <span className="attempt-number">{String(attempt.attempt_number).padStart(2, "0")}</span>
@@ -70,7 +70,7 @@ function DeliveryGeneration({ delivery }: { delivery: Delivery }) {
 export function EventTimeline({ deliveries }: { deliveries: Delivery[] }) {
   const ordered = [...deliveries].sort((left, right) => left.replay_generation - right.replay_generation);
   return (
-    <section className="event-timeline" aria-label="Delivery generation lineage">
+    <section className="event-timeline" aria-label="Original delivery and recovery replay lineage">
       {ordered.map((delivery, index) => (
         <div className="lineage-item" key={delivery.id}>
           {index > 0 ? (
@@ -85,4 +85,3 @@ export function EventTimeline({ deliveries }: { deliveries: Delivery[] }) {
     </section>
   );
 }
-

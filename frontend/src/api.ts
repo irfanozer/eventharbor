@@ -2,6 +2,8 @@ import type {
   DeadLetterListResponse,
   DeliveryAttemptsResponse,
   DeliveryStatus,
+  DemoScenarioId,
+  DemoEventPayload,
   Endpoint,
   EndpointListResponse,
   EventAccepted,
@@ -111,12 +113,12 @@ export function getDeadLetters(options: { limit?: number; cursor?: string } = {}
   );
 }
 
-export function getReceiverLab(): Promise<ReceiverLabState> {
-  return request("/demo/receiver-lab");
+export function getReceiverLab(runId?: string): Promise<ReceiverLabState> {
+  return request(`/demo/receiver-lab${queryString({ run_id: runId })}`);
 }
 
-export function setReceiverLabPreset(preset: ReceiverLabPreset): Promise<ReceiverLabState> {
-  return request("/demo/receiver-lab", {
+export function setReceiverLabPreset(preset: ReceiverLabPreset, runId?: string): Promise<ReceiverLabState> {
+  return request(`/demo/receiver-lab${queryString({ run_id: runId })}`, {
     method: "PUT",
     body: JSON.stringify({ preset }),
   });
@@ -159,17 +161,26 @@ export function publishDemoEvent(
   endpointId: string,
   runId: string = crypto.randomUUID(),
   idempotencyKey: string = `control-room-story-${runId}`,
+  payload: DemoEventPayload = {
+    order_id: `ORDER-${runId.slice(0, 8).toUpperCase()}`,
+    amount_cents: 12_900,
+    note: "Route to fulfillment after payment confirmation",
+  },
+  scenarioId: DemoScenarioId = "outage_replay",
 ): Promise<EventAccepted> {
   return request("/events", {
     method: "POST",
     headers: { "Idempotency-Key": idempotencyKey },
     body: JSON.stringify({
       endpoint_id: endpointId,
-      type: "demo.order.ready",
+      type: "demo.order.paid",
       data: {
         run_id: runId,
-        order_id: `ORDER-${runId.slice(0, 8).toUpperCase()}`,
+        scenario: scenarioId,
         purpose: "reliability-story",
+        order_id: payload.order_id,
+        amount_cents: payload.amount_cents,
+        note: payload.note,
       },
     }),
   });

@@ -37,9 +37,10 @@ export function ReplayConfirmation({
         }}
       >
         <p className="eyebrow">Controlled recovery</p>
-        <h2 id="replay-title">Approve a new delivery generation?</h2>
+        <h2 id="replay-title">Create a separate recovery replay?</h2>
         <p id="replay-description">
-          EventHarbor will keep generation 0 unchanged and create generation 1 from delivery {shortId(deliveryId)}.
+          EventHarbor will preserve the original failed delivery and every HTTP attempt, then create a new replay
+          from delivery {shortId(deliveryId)}. The replay starts again at request 1.
         </p>
         <div className="confirmation-warning">
           <strong>This sends the webhook again.</strong>
@@ -55,4 +56,3 @@ export function ReplayConfirmation({
     </div>
   );
 }
-

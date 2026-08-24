@@ -1,4 +1,6 @@
 import type {
+  DemoScenarioId,
+  DemoEventPayload,
   Endpoint,
   EventAccepted,
   EventDetail,
@@ -6,6 +8,7 @@ import type {
   ReceiverLabState,
   ReplayAccepted,
 } from "./types";
+import { DEFAULT_DEMO_SCENARIO_ID, demoScenario, isDemoScenarioId } from "./demoScenarios";
 
 export type ReliabilityTourPhase =
   | "idle"
@@ -26,6 +29,7 @@ export interface ReliabilityTourProgress {
   event: EventDetail | null;
   /** Total reserved attempts across every delivery generation in the event. */
   attemptCount: number;
+  scenarioId: DemoScenarioId;
   message: string;
 }
 
@@ -35,16 +39,20 @@ export interface ReliabilityTourResult extends ReliabilityTourProgress {
   endpointId: string | null;
   sourceDeliveryId: string | null;
   replayDeliveryId: string | null;
+  /** Retained so a paused pre-acceptance run can resume with identical business data. */
+  payload?: DemoEventPayload;
 }
 
 export interface ReliabilityTourDependencies {
-  getReceiverLab: () => Promise<ReceiverLabState>;
-  setReceiverLabPreset: (preset: ReceiverLabPreset) => Promise<ReceiverLabState>;
+  getReceiverLab: (runId?: string) => Promise<ReceiverLabState>;
+  setReceiverLabPreset: (preset: ReceiverLabPreset, runId?: string) => Promise<ReceiverLabState>;
   ensureReceiverLabEndpoint: () => Promise<Endpoint>;
   publishDemoEvent: (
     endpointId: string,
     runId: string,
     idempotencyKey: string,
+    payload?: DemoEventPayload,
+    scenarioId?: DemoScenarioId,
   ) => Promise<EventAccepted>;
   getEvent: (eventId: string) => Promise<EventDetail>;
   replayDelivery: (
@@ -62,6 +70,10 @@ export interface ReliabilityTourOptions {
   /** Supply these identifiers to resume a previously paused tour without clearing evidence. */
   eventId?: string;
   replayDeliveryId?: string;
+  /** Exact synthetic order data to publish. Omit it to use the API helper defaults. */
+  payload?: DemoEventPayload;
+  /** Server-owned Receiver Lab behavior selected before this event is published. */
+  scenarioId?: DemoScenarioId;
   pollIntervalMs?: number;
   presentationPauseMs?: number;
   timeoutMs?: number;
@@ -96,7 +108,7 @@ function assertDuration(name: string, value: number, allowZero: boolean): void {
 }
 
 /**
- * Run the complete failure -> containment -> repair -> replay story.
+ * Run one server-owned receiver scenario and follow only durable system state.
  *
  * Mutations use keys derived from one stable run ID. Progress is driven only by
  * fresh EventDetail responses; injected waits pace polling and presentation but
@@ -110,6 +122,7 @@ export async function runReliabilityTour(
   const presentationPauseMs =
     options.presentationPauseMs ?? DEFAULT_PRESENTATION_PAUSE_MS;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const selectedScenario = demoScenario(options.scenarioId ?? DEFAULT_DEMO_SCENARIO_ID);
   assertDuration("pollIntervalMs", pollIntervalMs, false);
   assertDuration("presentationPauseMs", presentationPauseMs, true);
   assertDuration("timeoutMs", timeoutMs, false);
@@ -129,6 +142,8 @@ export async function runReliabilityTour(
   let replayDeliveryId: string | null = options.replayDeliveryId ?? null;
   let event: EventDetail | null = null;
   let currentMessage = "Ready to run the reliability tour.";
+  // Snapshot editable input once so callers cannot change a running or resumable tour.
+  const payload = options.payload ? { ...options.payload } : undefined;
 
   const progress = (): ReliabilityTourProgress => ({
     phase,
@@ -136,6 +151,7 @@ export async function runReliabilityTour(
     eventId,
     event,
     attemptCount: attemptsIn(event),
+    scenarioId: selectedScenario.id,
     message: currentMessage,
   });
 
@@ -160,6 +176,7 @@ export async function runReliabilityTour(
     endpointId,
     sourceDeliveryId,
     replayDeliveryId,
+    payload,
   });
 
   const assertRunning = (): void => {
@@ -210,34 +227,50 @@ export async function runReliabilityTour(
     } else {
       report(
         "preparing",
-        "Configuring a deterministic failure and locating the Receiver Lab endpoint.",
+        `Configuring the isolated ${selectedScenario.shortLabel.toLowerCase()} scenario and locating Receiver Lab.`,
       );
 
-      const receiver = await dependencies.getReceiverLab();
-      if (receiver.preset !== "dead_letter") {
-        const configured = await dependencies.setReceiverLabPreset("dead_letter");
-        if (configured.preset !== "dead_letter") {
-          throw new TourPause("Receiver Lab did not enter the dead-letter preset.");
-        }
+      // A new event is a new scenario. Re-applying the preset resets the
+      // receiver's scenario-local counter while preserving its evidence log.
+      const configured = await dependencies.setReceiverLabPreset(selectedScenario.preset, runId);
+      if (configured.preset !== selectedScenario.preset) {
+        throw new TourPause(`Receiver Lab did not enter the ${selectedScenario.preset} preset.`);
       }
 
       const endpoint = await dependencies.ensureReceiverLabEndpoint();
       endpointId = endpoint.id;
-      const accepted = await dependencies.publishDemoEvent(
-        endpoint.id,
-        runId,
-        publishIdempotencyKey,
-      );
+      const accepted = payload
+        ? await dependencies.publishDemoEvent(
+            endpoint.id,
+            runId,
+            publishIdempotencyKey,
+            payload,
+            selectedScenario.id,
+          )
+        : await dependencies.publishDemoEvent(
+            endpoint.id,
+            runId,
+            publishIdempotencyKey,
+            undefined,
+            selectedScenario.id,
+          );
       eventId = accepted.event_id;
       event = await dependencies.getEvent(accepted.event_id);
     }
 
     if (!event) throw new Error("The accepted event could not be loaded.");
-    report("accepted", "The event and generation 0 are durably accepted.", event);
+    const persistedScenario = event.data.scenario;
+    if (isDemoScenarioId(persistedScenario) && persistedScenario !== selectedScenario.id) {
+      return fail(
+        `This event belongs to the ${persistedScenario} scenario, not ${selectedScenario.id}.`,
+        event,
+      );
+    }
+    report("accepted", "The event and its original delivery are safely stored.", event);
     await pauseForPresentation();
 
     let source = sourceDelivery(event);
-    if (!source) return fail("The accepted event is missing delivery generation 0.", event);
+    if (!source) return fail("The accepted event is missing its original delivery.", event);
     sourceDeliveryId = source.id;
     endpointId ??= source.endpoint_id;
 
@@ -245,7 +278,54 @@ export async function runReliabilityTour(
       (delivery) => delivery.replay_generation > 0,
     );
     if (existingReplays.some((delivery) => delivery.replay_generation > 1)) {
-      return fail("The event contains an unexpected replay generation.", event);
+      return fail("The event contains an unexpected extra recovery replay.", event);
+    }
+
+    if (selectedScenario.strategy !== "replay") {
+      if (existingReplays.length > 0) {
+        return fail("This automatic scenario unexpectedly contains a recovery replay.", event);
+      }
+
+      while (source.status !== "delivered" && source.status !== "dead_lettered") {
+        report(
+          "failing",
+          selectedScenario.id === "rate_limit_recovery"
+            ? "Receiver Lab is returning HTTP 429 while the worker follows Retry-After."
+            : "Receiver Lab is returning a real failure while the worker records and classifies it.",
+          event,
+        );
+        event = await readEventAfterPoll();
+        source = sourceDelivery(event);
+        if (!source) return fail("The original delivery disappeared from the event.", event);
+        sourceDeliveryId = source.id;
+      }
+
+      if (selectedScenario.strategy === "automatic" && source.status === "delivered") {
+        report(
+          "verified",
+          selectedScenario.id === "rate_limit_recovery"
+            ? "The original delivery succeeded after two real 429 responses and receiver-directed waits."
+            : "The original delivery recovered automatically after two real 503 responses.",
+          event,
+        );
+        return result();
+      }
+
+      if (selectedScenario.strategy === "terminal" && source.status === "dead_lettered") {
+        report(
+          "verified",
+          "HTTP 400 was classified as permanent, so EventHarbor stopped after one request instead of retrying bad data.",
+          event,
+        );
+        return result();
+      }
+
+      return fail(
+        selectedScenario.strategy === "terminal"
+          ? "The permanently rejected event did not stop as expected."
+          : "The receiver did not recover during the original delivery as expected.",
+        event,
+      );
     }
 
     if (existingReplays.length > 0 && !replayDeliveryId) {
@@ -259,12 +339,12 @@ export async function runReliabilityTour(
       while (source.status !== "dead_lettered") {
         if (source.status === "delivered") {
           return fail(
-            "Generation 0 delivered unexpectedly; the controlled failure was interrupted.",
+            "The original delivery succeeded unexpectedly; the controlled failure was interrupted.",
             event,
           );
         }
         if (event.deliveries.some((delivery) => delivery.replay_generation > 0)) {
-          return fail("A replay generation appeared before this tour authorized it.", event);
+          return fail("A recovery replay appeared before this tour authorized it.", event);
         }
 
         report(
@@ -274,28 +354,28 @@ export async function runReliabilityTour(
         );
         event = await readEventAfterPoll();
         source = sourceDelivery(event);
-        if (!source) return fail("Delivery generation 0 disappeared from the event.", event);
+        if (!source) return fail("The original delivery disappeared from the event.", event);
         sourceDeliveryId = source.id;
       }
 
       report(
         "contained",
-        "The retry budget is exhausted and generation 0 is preserved as a dead letter.",
+        "The retry budget is exhausted. The stopped original delivery and every failed request remain preserved.",
         event,
       );
       await pauseForPresentation();
 
       report("repairing", "Checking Receiver Lab before applying the success preset.", event);
-      const receiver = await dependencies.getReceiverLab();
+      const receiver = await dependencies.getReceiverLab(runId);
       if (receiver.preset !== "success") {
-        const repaired = await dependencies.setReceiverLabPreset("success");
+        const repaired = await dependencies.setReceiverLabPreset("success", runId);
         if (repaired.preset !== "success") {
           throw new TourPause("Receiver Lab did not enter the success preset.");
         }
       }
       await pauseForPresentation();
 
-      report("replaying", "Creating a traceable replay generation with a stable key.", event);
+      report("replaying", "Creating a separate, traceable recovery replay that starts at request 1.", event);
       const replay = await dependencies.replayDelivery(source.id, replayIdempotencyKey);
       replayDeliveryId = replay.delivery_id;
       event = await dependencies.getEvent(eventId);
@@ -309,13 +389,13 @@ export async function runReliabilityTour(
         return fail("The accepted replay is missing from the event lineage.", event);
       }
       if (currentReplay.replayed_from_delivery_id !== source.id) {
-        return fail("The replay does not descend from generation 0.", event);
+        return fail("The recovery replay is not linked to the original delivery.", event);
       }
       if (currentReplay.status !== "delivered" && currentReplay.status !== "dead_lettered") {
         report("repairing", "Verifying Receiver Lab before the active replay continues.", event);
-        const receiver = await dependencies.getReceiverLab();
+        const receiver = await dependencies.getReceiverLab(runId);
         if (receiver.preset !== "success") {
-          const repaired = await dependencies.setReceiverLabPreset("success");
+          const repaired = await dependencies.setReceiverLabPreset("success", runId);
           if (repaired.preset !== "success") {
             throw new TourPause("Receiver Lab did not enter the success preset.");
           }
@@ -332,22 +412,22 @@ export async function runReliabilityTour(
           (delivery) => delivery.replay_generation > 0,
         );
         if (otherReplay) {
-          return fail("A different replay generation superseded this tour's replay.", event);
+          return fail("A different recovery replay superseded this tour's replay.", event);
         }
       } else if (replay.status === "delivered") {
         report(
           "verified",
-          "Generation 1 delivered while generation 0 remains intact as failure evidence.",
+          "The recovery replay succeeded while the stopped original delivery remains intact as failure evidence.",
           event,
         );
         return result();
       } else if (replay.status === "dead_lettered") {
-        return fail("The replay generation also reached the dead-letter boundary.", event);
+        return fail("The recovery replay also reached the dead-letter boundary.", event);
       }
 
       report(
         "replaying",
-        "The repaired receiver is handling the new delivery generation.",
+        "The repaired receiver is handling the separate recovery replay.",
         event,
       );
       event = await readEventAfterPoll();

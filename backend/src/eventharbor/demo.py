@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from eventharbor.demo_runs import normalized_demo_run_id
 from eventharbor.errors import DomainError
 from eventharbor.schemas import (
     ReceiverLabConfigurationResponse,
@@ -35,6 +36,7 @@ SCENARIOS: dict[ReceiverLabPreset, ReceiverScenario] = {
     ReceiverLabPreset.SUCCESS: ReceiverScenario("success", 0, 0),
     ReceiverLabPreset.RETRY_THEN_RECOVER: ReceiverScenario("fail_then_succeed", 2, 0),
     ReceiverLabPreset.RATE_LIMITED: ReceiverScenario("rate_limited", 0, 0),
+    ReceiverLabPreset.RATE_LIMIT_THEN_RECOVER: ReceiverScenario("rate_limited", 2, 0),
     ReceiverLabPreset.TIMEOUT: ReceiverScenario("timeout", 0, 7_000),
     ReceiverLabPreset.PERMANENT_FAILURE: ReceiverScenario("permanent_failure", 0, 0),
     # Receiver Lab permits at most twenty seeded failures. That is intentionally
@@ -49,16 +51,19 @@ class ReceiverLabDemoService:
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._client = client
 
-    async def state(self) -> ReceiverLabStateResponse:
-        payload = await self._request("GET", "/control")
+    async def state(self, run_id: str | None = None) -> ReceiverLabStateResponse:
+        payload = await self._request("GET", "/control", params=self._run_params(run_id))
         try:
             configuration = ReceiverLabConfigurationResponse.model_validate(
                 payload["configuration"]
             )
             attempts = int(payload["attempts"])
+            raw_requests = payload.get("requests", [])
+            if not isinstance(raw_requests, list):
+                raise TypeError("receiver requests must be a list")
             requests = [
                 ReceiverLabRequestResponse.model_validate(item)
-                for item in payload.get("requests", [])[-20:]
+                for item in raw_requests[-20:]
             ]
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
             raise self._unavailable() from exc
@@ -70,9 +75,19 @@ class ReceiverLabDemoService:
             requests=requests,
         )
 
-    async def configure(self, preset: ReceiverLabPreset) -> ReceiverLabStateResponse:
-        await self._request("PUT", "/control", json=SCENARIOS[preset].as_payload())
-        return await self.state()
+    async def configure(
+        self,
+        preset: ReceiverLabPreset,
+        run_id: str | None = None,
+    ) -> ReceiverLabStateResponse:
+        params = self._run_params(run_id)
+        await self._request(
+            "PUT",
+            "/control",
+            json=SCENARIOS[preset].as_payload(),
+            params=params,
+        )
+        return await self.state(run_id)
 
     async def _request(
         self,
@@ -80,9 +95,10 @@ class ReceiverLabDemoService:
         path: str,
         *,
         json: dict[str, str | int] | None = None,
+        params: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         try:
-            response = await self._client.request(method, path, json=json)
+            response = await self._client.request(method, path, json=json, params=params)
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
@@ -90,6 +106,14 @@ class ReceiverLabDemoService:
         if not isinstance(payload, dict):
             raise self._unavailable()
         return payload
+
+    @staticmethod
+    def _run_params(run_id: str | None) -> dict[str, str] | None:
+        if run_id is None:
+            return None
+        if normalized_demo_run_id(run_id) != run_id:
+            raise ValueError("run_id must be a bounded, header-safe identifier")
+        return {"run_id": run_id}
 
     @staticmethod
     def _identify_preset(

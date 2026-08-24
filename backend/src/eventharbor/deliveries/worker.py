@@ -23,6 +23,7 @@ from eventharbor.deliveries.state_machine import (
     ensure_transition,
 )
 from eventharbor.deliveries.transport import AttemptResult, OutboundWebhook, send_webhook
+from eventharbor.demo_runs import normalized_demo_run_id
 from eventharbor.models import Delivery, DeliveryAttempt, Endpoint, Event
 
 logger = logging.getLogger(__name__)
@@ -177,6 +178,7 @@ class DeliveryWorker:
                 payload_bytes=event.payload_bytes,
                 attempt_number=delivery.attempt_count,
                 lease_token=lease_token,
+                demo_run_id=normalized_demo_run_id(event.payload.get("run_id")),
             )
 
     def _unclaimable_due_reason(

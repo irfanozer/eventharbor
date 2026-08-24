@@ -12,6 +12,7 @@ from eventharbor.control_room import ControlRoomQueryService, ControlRoomReposit
 from eventharbor.database import get_session
 from eventharbor.deliveries.state_machine import DeliveryStatus
 from eventharbor.demo import ReceiverLabDemoService
+from eventharbor.demo_runs import DEMO_RUN_ID_MAX_LENGTH, DEMO_RUN_ID_PATTERN
 from eventharbor.errors import DomainError
 from eventharbor.models import Endpoint
 from eventharbor.repositories import DeliveryRepository, EndpointRepository, EventRepository
@@ -44,6 +45,10 @@ ApplicationSettings = Annotated[Settings, Depends(get_settings)]
 IdempotencyKey = Annotated[
     str,
     Header(alias="Idempotency-Key", min_length=1, max_length=255),
+]
+DemoRunId = Annotated[
+    str | None,
+    Query(max_length=DEMO_RUN_ID_MAX_LENGTH, pattern=DEMO_RUN_ID_PATTERN),
 ]
 
 
@@ -399,6 +404,7 @@ async def list_dead_letters(
 async def get_receiver_lab_state(
     response: Response,
     settings: ApplicationSettings,
+    run_id: DemoRunId = None,
 ) -> ReceiverLabStateResponse:
     """Read bounded Receiver Lab evidence through the same-origin API facade."""
 
@@ -407,7 +413,7 @@ async def get_receiver_lab_state(
         timeout=3.0,
         follow_redirects=False,
     ) as client:
-        result = await ReceiverLabDemoService(client).state()
+        result = await ReceiverLabDemoService(client).state(run_id)
     _disable_cache(response)
     return result
 
@@ -421,6 +427,7 @@ async def configure_receiver_lab(
     request: ReceiverLabPresetRequest,
     response: Response,
     settings: ApplicationSettings,
+    run_id: DemoRunId = None,
 ) -> ReceiverLabStateResponse:
     """Apply one named, server-owned Receiver Lab scenario."""
 
@@ -429,6 +436,6 @@ async def configure_receiver_lab(
         timeout=3.0,
         follow_redirects=False,
     ) as client:
-        result = await ReceiverLabDemoService(client).configure(request.preset)
+        result = await ReceiverLabDemoService(client).configure(request.preset, run_id)
     _disable_cache(response)
     return result

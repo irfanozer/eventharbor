@@ -37,6 +37,7 @@ from eventharbor.schemas import (
     ReceiverLabConfigurationResponse,
     ReceiverLabPreset,
     ReceiverLabPresetRequest,
+    ReceiverLabRequestResponse,
     ReceiverLabStateResponse,
 )
 from eventharbor.services import (
@@ -392,6 +393,7 @@ async def test_dead_letter_list_explains_replay_eligibility(
 
 
 def receiver_state(preset: ReceiverLabPreset) -> ReceiverLabStateResponse:
+    now = datetime.now(UTC)
     return ReceiverLabStateResponse(
         preset=preset,
         configuration=ReceiverLabConfigurationResponse(
@@ -399,18 +401,36 @@ def receiver_state(preset: ReceiverLabPreset) -> ReceiverLabStateResponse:
             failures_before_success=0,
             delay_ms=0,
         ),
-        attempts=0,
-        requests=[],
+        attempts=1,
+        requests=[
+            ReceiverLabRequestResponse(
+                sequence=7,
+                attempt=1,
+                event_id="event-1",
+                delivery_id="delivery-1",
+                event_type="demo.order.ready",
+                delivery_attempt=1,
+                request_timestamp=1_700_000_000,
+                received_at=now,
+                response_status_code=503,
+                receiver_mode="fail_then_succeed",
+                signature_present=True,
+                body_preview='{"order_id":"ORDER-1"}',
+                body_sha256="a" * 64,
+            )
+        ],
     )
 
 
 @pytest.mark.asyncio
 async def test_receiver_lab_facade_routes_map_state_and_disable_cache(monkeypatch) -> None:
-    async def fake_state(service):
+    async def fake_state(service, run_id):
+        assert run_id == "run-1"
         return receiver_state(ReceiverLabPreset.SUCCESS)
 
-    async def fake_configure(service, preset):
+    async def fake_configure(service, preset, run_id):
         assert preset is ReceiverLabPreset.DEAD_LETTER
+        assert run_id == "run-1"
         return receiver_state(preset)
 
     monkeypatch.setattr(ReceiverLabDemoService, "state", fake_state)
@@ -419,14 +439,17 @@ async def test_receiver_lab_facade_routes_map_state_and_disable_cache(monkeypatc
     get_response = Response()
     put_response = Response()
 
-    read_result = await get_receiver_lab_state(get_response, settings)
+    read_result = await get_receiver_lab_state(get_response, settings, "run-1")
     configured_result = await configure_receiver_lab(
         ReceiverLabPresetRequest(preset=ReceiverLabPreset.DEAD_LETTER),
         put_response,
         settings,
+        "run-1",
     )
 
     assert get_response.headers["Cache-Control"] == "no-store"
     assert put_response.headers["Cache-Control"] == "no-store"
     assert read_result.preset is ReceiverLabPreset.SUCCESS
+    assert read_result.requests[0].delivery_id == "delivery-1"
+    assert read_result.requests[0].response_status_code == 503
     assert configured_result.preset is ReceiverLabPreset.DEAD_LETTER

@@ -31,6 +31,7 @@ class OutboundWebhook:
     payload_bytes: bytes
     attempt_number: int
     lease_token: UUID
+    demo_run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +112,8 @@ async def send_webhook(
         "X-EventHarbor-Timestamp": str(request_timestamp),
         "X-EventHarbor-Signature": signature,
     }
+    if webhook.demo_run_id is not None:
+        headers["X-EventHarbor-Demo-Run-Id"] = webhook.demo_run_id
     started_monotonic = monotonic_clock()
 
     try:

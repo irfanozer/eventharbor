@@ -248,6 +248,7 @@ def _worker(session: _FakeSession, **setting_overrides: Any) -> DeliveryWorker:
 async def test_claim_one_leases_due_delivery_and_returns_immutable_snapshot() -> None:
     delivery = _delivery(status=DeliveryStatus.PENDING, attempt_count=0)
     event = _event()
+    event.payload["run_id"] = "run-1"
     endpoint = _endpoint()
     session = _FakeSession(delivery, related={Event: event, Endpoint: endpoint})
     worker = _worker(session)
@@ -259,6 +260,7 @@ async def test_claim_one_leases_due_delivery_and_returns_immutable_snapshot() ->
     assert claimed.event_id == event.id
     assert claimed.endpoint_url == endpoint.target_url
     assert claimed.payload_bytes == event.payload_bytes
+    assert claimed.demo_run_id == "run-1"
     assert claimed.attempt_number == 1
     assert delivery.status == DeliveryStatus.IN_PROGRESS
     assert delivery.attempt_count == 1
@@ -273,6 +275,20 @@ async def test_claim_one_leases_due_delivery_and_returns_immutable_snapshot() ->
     assert reserved.lease_token == claimed.lease_token
     assert reserved.disposition is None
     assert session.flush_count == 1
+
+
+@pytest.mark.asyncio
+async def test_claim_one_omits_unsafe_demo_run_identifier() -> None:
+    delivery = _delivery(status=DeliveryStatus.PENDING, attempt_count=0)
+    event = _event()
+    event.payload["run_id"] = "not safe"
+    endpoint = _endpoint()
+    session = _FakeSession(delivery, related={Event: event, Endpoint: endpoint})
+
+    claimed = await _worker(session).claim_one()
+
+    assert isinstance(claimed, OutboundWebhook)
+    assert claimed.demo_run_id is None
 
 
 @pytest.mark.asyncio

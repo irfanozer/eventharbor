@@ -12,7 +12,7 @@ from eventharbor.deliveries.signing import verify_signature
 from eventharbor.deliveries.transport import OutboundWebhook, send_webhook
 
 
-def webhook() -> OutboundWebhook:
+def webhook(*, demo_run_id: str | None = None) -> OutboundWebhook:
     return OutboundWebhook(
         attempt_id=UUID("00000000-0000-0000-0000-000000000004"),
         delivery_id=UUID("00000000-0000-0000-0000-000000000002"),
@@ -23,6 +23,7 @@ def webhook() -> OutboundWebhook:
         payload_bytes=b'{"data":{"order_id":"123"},"type":"order.shipped"}',
         attempt_number=1,
         lease_token=UUID("00000000-0000-0000-0000-000000000003"),
+        demo_run_id=demo_run_id,
     )
 
 
@@ -38,12 +39,13 @@ def monotonic(values: list[float]) -> Callable[[], float]:
 
 @pytest.mark.asyncio
 async def test_success_sends_exact_bytes_and_verifiable_signature() -> None:
-    outbound = webhook()
+    outbound = webhook(demo_run_id="run-1")
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.content == outbound.payload_bytes
         assert request.headers["X-EventHarbor-Event-Id"] == str(outbound.event_id)
         assert request.headers["X-EventHarbor-Delivery-Id"] == str(outbound.delivery_id)
+        assert request.headers["X-EventHarbor-Demo-Run-Id"] == "run-1"
         timestamp = int(request.headers["X-EventHarbor-Timestamp"])
         assert verify_signature(
             outbound.signing_secret,
@@ -67,6 +69,25 @@ async def test_success_sends_exact_bytes_and_verifiable_signature() -> None:
     assert result.http_status_code == 200
     assert result.response_body_excerpt == "accepted"
     assert result.duration_ms == 25
+
+
+@pytest.mark.asyncio
+async def test_non_demo_webhook_omits_internal_run_header() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "X-EventHarbor-Demo-Run-Id" not in request.headers
+        return httpx.Response(200)
+
+    now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await send_webhook(
+            webhook(),
+            client,
+            retry_after_cap_seconds=60,
+            clock=clock([now, now]),
+            monotonic_clock=monotonic([10.0, 10.001]),
+        )
+
+    assert result.disposition == DeliveryDisposition.SUCCEEDED
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ import {
 } from "./reliabilityTour";
 import type {
   Delivery,
+  DemoEventPayload,
   Endpoint,
   EventAccepted,
   EventDetail,
@@ -44,7 +45,7 @@ function event(...deliveries: Delivery[]): EventDetail {
   return {
     id: "event-1",
     source: "local-api",
-    type: "demo.order.ready",
+    type: "demo.order.paid",
     data: { run_id: "run-1" },
     payload_sha256: "a".repeat(64),
     request_fingerprint_sha256: "b".repeat(64),
@@ -84,7 +85,7 @@ function accepted(): EventAccepted {
     event_id: "event-1",
     delivery_id: "delivery-0",
     endpoint_id: "endpoint-1",
-    type: "demo.order.ready",
+    type: "demo.order.paid",
     status: "pending",
     created_at: now,
   };
@@ -150,9 +151,15 @@ describe("runReliabilityTour", () => {
       verifiedEvent,
     ]);
     const updates: ReliabilityTourProgress[] = [];
+    const payload: DemoEventPayload = {
+      order_id: "ORDER-RECRUITER-7",
+      amount_cents: 54_321,
+      note: "Leave with the front desk",
+    };
 
     const result = await runReliabilityTour(deps, {
       runId: "run-1",
+      payload,
       pollIntervalMs: 10,
       presentationPauseMs: 5,
       timeoutMs: 1_000,
@@ -164,18 +171,23 @@ describe("runReliabilityTour", () => {
     expect(result.attemptCount).toBe(5);
     expect(result.sourceDeliveryId).toBe("delivery-0");
     expect(result.replayDeliveryId).toBe("delivery-1");
+    expect(result.payload).toEqual(payload);
     expect(deps.publishDemoEvent).toHaveBeenCalledWith(
       "endpoint-1",
       "run-1",
       "control-room-story-run-1",
+      payload,
+      "outage_replay",
     );
     expect(deps.replayDelivery).toHaveBeenCalledWith(
       "delivery-0",
       "control-room-replay-run-1",
     );
-    // The initial state was already dead_letter, so only the repair mutates Receiver Lab.
-    expect(setReceiverLabPreset).toHaveBeenCalledTimes(1);
-    expect(setReceiverLabPreset).toHaveBeenCalledWith("success");
+    // A fresh run re-applies the outage preset to reset its scenario counter,
+    // then the recovery step explicitly changes the receiver to success.
+    expect(setReceiverLabPreset).toHaveBeenCalledTimes(2);
+    expect(setReceiverLabPreset).toHaveBeenNthCalledWith(1, "dead_letter", "run-1");
+    expect(setReceiverLabPreset).toHaveBeenCalledWith("success", "run-1");
     expect(updates.map((update) => update.phase)).toEqual(expect.arrayContaining([
       "idle",
       "preparing",
@@ -187,6 +199,41 @@ describe("runReliabilityTour", () => {
       "verified",
     ]));
     expect(updates.some((update) => update.phase === "failing" && update.attemptCount === 2)).toBe(true);
+  });
+
+  it("resumes from durable evidence without republishing or changing its payload", async () => {
+    const containedEvent = event(delivery("delivery-0", 0, "dead_lettered", 4));
+    const replayingEvent = event(
+      delivery("delivery-0", 0, "dead_lettered", 4),
+      delivery("delivery-1", 1, "pending", 0),
+    );
+    const verifiedEvent = event(
+      delivery("delivery-0", 0, "dead_lettered", 4),
+      delivery("delivery-1", 1, "delivered", 1),
+    );
+    const { deps } = dependencies([containedEvent, replayingEvent, verifiedEvent]);
+    const payload: DemoEventPayload = {
+      order_id: "ORDER-RESUME-9",
+      amount_cents: 8_765,
+      note: "Keep this exact input",
+    };
+
+    const result = await runReliabilityTour(deps, {
+      runId: "run-1",
+      eventId: "event-1",
+      payload,
+      pollIntervalMs: 10,
+      presentationPauseMs: 0,
+      timeoutMs: 1_000,
+    });
+
+    expect(result.phase).toBe("verified");
+    expect(result.payload).toEqual(payload);
+    expect(deps.publishDemoEvent).not.toHaveBeenCalled();
+    expect(deps.replayDelivery).toHaveBeenCalledWith(
+      "delivery-0",
+      "control-room-replay-run-1",
+    );
   });
 
   it("fails if generation 0 succeeds instead of reaching containment", async () => {
@@ -202,9 +249,61 @@ describe("runReliabilityTour", () => {
     });
 
     expect(result.phase).toBe("failed");
-    expect(result.message).toContain("delivered unexpectedly");
+    expect(result.message).toContain("succeeded unexpectedly");
     expect(deps.replayDelivery).not.toHaveBeenCalled();
     expect(result.event?.deliveries[0]?.status).toBe("delivered");
+  });
+
+  it.each([
+    ["transient_recovery", "retry_then_recover"],
+    ["rate_limit_recovery", "rate_limit_then_recover"],
+  ] as const)(
+    "finishes the %s scenario inside generation 0 without creating a replay",
+    async (scenarioId, expectedPreset) => {
+      const acceptedEvent = event(delivery("delivery-0", 0, "pending", 0));
+      const retryingEvent = event(delivery("delivery-0", 0, "retry_wait", 2));
+      const deliveredEvent = event(delivery("delivery-0", 0, "delivered", 3));
+      const { deps, setReceiverLabPreset } = dependencies([
+        acceptedEvent,
+        retryingEvent,
+        deliveredEvent,
+      ]);
+
+      const result = await runReliabilityTour(deps, {
+        runId: "run-1",
+        scenarioId,
+        pollIntervalMs: 10,
+        presentationPauseMs: 0,
+        timeoutMs: 1_000,
+      });
+
+      expect(result.phase).toBe("verified");
+      expect(result.scenarioId).toBe(scenarioId);
+      expect(result.event).toEqual(deliveredEvent);
+      expect(setReceiverLabPreset).toHaveBeenCalledTimes(1);
+      expect(setReceiverLabPreset).toHaveBeenCalledWith(expectedPreset, "run-1");
+      expect(deps.replayDelivery).not.toHaveBeenCalled();
+    },
+  );
+
+  it("classifies HTTP 400 as a verified terminal outcome without retry or replay", async () => {
+    const acceptedEvent = event(delivery("delivery-0", 0, "pending", 0));
+    const rejectedEvent = event(delivery("delivery-0", 0, "dead_lettered", 1));
+    const { deps, setReceiverLabPreset } = dependencies([acceptedEvent, rejectedEvent]);
+
+    const result = await runReliabilityTour(deps, {
+      runId: "run-1",
+      scenarioId: "permanent_rejection",
+      pollIntervalMs: 10,
+      presentationPauseMs: 0,
+      timeoutMs: 1_000,
+    });
+
+    expect(result.phase).toBe("verified");
+    expect(result.attemptCount).toBe(1);
+    expect(result.message).toContain("stopped after one request");
+    expect(setReceiverLabPreset).toHaveBeenCalledWith("permanent_failure", "run-1");
+    expect(deps.replayDelivery).not.toHaveBeenCalled();
   });
 
   it("fails without erasing either generation when the replay dead-letters", async () => {
@@ -223,7 +322,7 @@ describe("runReliabilityTour", () => {
     });
 
     expect(result.phase).toBe("failed");
-    expect(result.message).toContain("replay generation also reached");
+    expect(result.message).toContain("recovery replay also reached");
     expect(result.event?.deliveries).toHaveLength(2);
     expect(result.attemptCount).toBe(8);
   });

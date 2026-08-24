@@ -1,11 +1,21 @@
 """Safe, deterministic webhook receiver for development and demos."""
 
 import asyncio
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
+from hashlib import sha256
 from typing import Annotated
 
-from fastapi import FastAPI, Header, Request, Response, status
+from fastapi import FastAPI, Header, Query, Request, Response, status
 from pydantic import BaseModel, Field
+
+from eventharbor.demo_runs import DEMO_RUN_ID_MAX_LENGTH, DEMO_RUN_ID_PATTERN
+
+MAX_SCOPED_RUNS = 100
+MAX_REQUESTS_PER_RUN = 100
+CONTROL_REQUEST_LIMIT = 20
 
 
 class ReceiverMode(StrEnum):
@@ -22,12 +32,54 @@ class ReceiverConfiguration(BaseModel):
     delay_ms: int = Field(default=0, ge=0, le=30_000)
 
 
+@dataclass(slots=True)
+class ReceiverRunState:
+    """Independent deterministic behavior and evidence for one demo run."""
+
+    configuration: ReceiverConfiguration = field(default_factory=ReceiverConfiguration)
+    scenario_attempts: int = 0
+    sequence: int = 0
+    requests: list[dict[str, object]] = field(default_factory=list)
+
+
 class ReceiverState:
+    """Bounded run registry plus a backward-compatible unscoped state."""
+
     def __init__(self) -> None:
-        self.configuration = ReceiverConfiguration()
-        self.attempts = 0
-        self.requests: list[dict[str, object]] = []
+        self.default = ReceiverRunState()
+        self.scoped: OrderedDict[str, ReceiverRunState] = OrderedDict()
         self.lock = asyncio.Lock()
+
+    async def reset(self) -> None:
+        """Restore pristine in-memory state for tests or process-local tooling."""
+
+        async with self.lock:
+            self.default = ReceiverRunState()
+            self.scoped.clear()
+
+    def configured_state(self, run_id: str | None) -> ReceiverRunState:
+        """Return or create an LRU-bounded state for a control-plane request."""
+
+        if run_id is None:
+            return self.default
+        state = self.scoped.pop(run_id, None)
+        if state is None:
+            state = ReceiverRunState()
+        self.scoped[run_id] = state
+        while len(self.scoped) > MAX_SCOPED_RUNS:
+            self.scoped.popitem(last=False)
+        return state
+
+    def webhook_state(self, run_id: str | None) -> ReceiverRunState:
+        """Use an existing scoped state, falling back for legacy unscoped clients."""
+
+        if run_id is None:
+            return self.default
+        state = self.scoped.pop(run_id, None)
+        if state is None:
+            return self.default
+        self.scoped[run_id] = state
+        return state
 
 
 receiver = ReceiverState()
@@ -44,64 +96,125 @@ async def health() -> dict[str, str]:
 
 
 @app.put("/control", tags=["receiver lab"])
-async def configure(configuration: ReceiverConfiguration) -> dict[str, object]:
+async def configure(
+    configuration: ReceiverConfiguration,
+    run_id: Annotated[
+        str | None,
+        Query(max_length=DEMO_RUN_ID_MAX_LENGTH, pattern=DEMO_RUN_ID_PATTERN),
+    ] = None,
+) -> dict[str, object]:
     async with receiver.lock:
-        receiver.configuration = configuration
-        receiver.attempts = 0
-        receiver.requests.clear()
+        run = receiver.configured_state(run_id)
+        run.configuration = configuration
+        run.scenario_attempts = 0
     return {"configuration": configuration.model_dump(), "attempts": 0}
 
 
 @app.get("/control", tags=["receiver lab"])
-async def control_state() -> dict[str, object]:
+async def control_state(
+    run_id: Annotated[
+        str | None,
+        Query(max_length=DEMO_RUN_ID_MAX_LENGTH, pattern=DEMO_RUN_ID_PATTERN),
+    ] = None,
+) -> dict[str, object]:
     """Expose bounded, non-secret evidence for the local Control Room."""
 
     async with receiver.lock:
+        run = receiver.configured_state(run_id)
         return {
-            "configuration": receiver.configuration.model_dump(),
-            "attempts": receiver.attempts,
-            "requests": list(receiver.requests[-20:]),
+            "configuration": run.configuration.model_dump(),
+            "attempts": run.scenario_attempts,
+            "requests": list(run.requests[-CONTROL_REQUEST_LIMIT:]),
         }
 
 
 @app.get("/requests", tags=["receiver lab"])
-async def list_requests() -> dict[str, object]:
+async def list_requests(
+    run_id: Annotated[
+        str | None,
+        Query(max_length=DEMO_RUN_ID_MAX_LENGTH, pattern=DEMO_RUN_ID_PATTERN),
+    ] = None,
+) -> dict[str, object]:
     async with receiver.lock:
-        return {"count": len(receiver.requests), "requests": list(receiver.requests)}
+        run = receiver.configured_state(run_id)
+        return {"count": len(run.requests), "requests": list(run.requests)}
 
 
 @app.post("/webhooks", tags=["receiver lab"])
 async def receive_webhook(
     request: Request,
     event_id: Annotated[str | None, Header(alias="X-EventHarbor-Event-Id")] = None,
+    delivery_id: Annotated[str | None, Header(alias="X-EventHarbor-Delivery-Id")] = None,
+    event_type: Annotated[str | None, Header(alias="X-EventHarbor-Event-Type")] = None,
+    delivery_attempt: Annotated[int | None, Header(alias="X-EventHarbor-Attempt")] = None,
+    request_timestamp: Annotated[
+        int | None, Header(alias="X-EventHarbor-Timestamp")
+    ] = None,
     signature: Annotated[str | None, Header(alias="X-EventHarbor-Signature")] = None,
+    demo_run_id: Annotated[
+        str | None,
+        Header(
+            alias="X-EventHarbor-Demo-Run-Id",
+            max_length=DEMO_RUN_ID_MAX_LENGTH,
+            pattern=DEMO_RUN_ID_PATTERN,
+        ),
+    ] = None,
 ) -> Response:
     body = await request.body()
+    received_at = datetime.now(UTC)
 
     async with receiver.lock:
-        receiver.attempts += 1
-        attempt = receiver.attempts
-        configuration = receiver.configuration
-        receiver.requests.append(
+        run = receiver.webhook_state(demo_run_id)
+        run.scenario_attempts += 1
+        run.sequence += 1
+        attempt = run.scenario_attempts
+        sequence = run.sequence
+        configuration = run.configuration
+
+        if configuration.mode == ReceiverMode.RATE_LIMITED:
+            # A zero failure count preserves the sustained-rate-limit test mode.
+            # A positive count creates a realistic, bounded 429 -> recovery story.
+            rate_limit_active = (
+                configuration.failures_before_success == 0
+                or attempt <= configuration.failures_before_success
+            )
+            response_status_code = (
+                status.HTTP_429_TOO_MANY_REQUESTS
+                if rate_limit_active
+                else status.HTTP_200_OK
+            )
+        elif configuration.mode == ReceiverMode.PERMANENT_FAILURE:
+            response_status_code = status.HTTP_400_BAD_REQUEST
+        elif (
+            configuration.mode == ReceiverMode.FAIL_THEN_SUCCEED
+            and attempt <= configuration.failures_before_success
+        ):
+            response_status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        else:
+            response_status_code = status.HTTP_200_OK
+
+        run.requests.append(
             {
+                "sequence": sequence,
                 "attempt": attempt,
                 "event_id": event_id,
+                "delivery_id": delivery_id,
+                "event_type": event_type,
+                "delivery_attempt": delivery_attempt,
+                "request_timestamp": request_timestamp,
+                "received_at": received_at,
+                "response_status_code": response_status_code,
+                "receiver_mode": configuration.mode.value,
                 "signature_present": signature is not None,
                 "body_preview": body[:1_024].decode("utf-8", errors="replace"),
+                "body_sha256": sha256(body).hexdigest(),
             }
         )
-        receiver.requests[:] = receiver.requests[-100:]
+        run.requests[:] = run.requests[-MAX_REQUESTS_PER_RUN:]
 
     if configuration.mode == ReceiverMode.TIMEOUT:
         await asyncio.sleep(configuration.delay_ms / 1_000)
-        return Response(status_code=status.HTTP_200_OK)
-    if configuration.mode == ReceiverMode.RATE_LIMITED:
-        return Response(status_code=status.HTTP_429_TOO_MANY_REQUESTS, headers={"Retry-After": "2"})
-    if configuration.mode == ReceiverMode.PERMANENT_FAILURE:
-        return Response(status_code=status.HTTP_400_BAD_REQUEST)
-    if (
-        configuration.mode == ReceiverMode.FAIL_THEN_SUCCEED
-        and attempt <= configuration.failures_before_success
-    ):
-        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
-    return Response(status_code=status.HTTP_200_OK)
+        return Response(status_code=response_status_code)
+    if response_status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+        return Response(status_code=response_status_code, headers={"Retry-After": "2"})
+    return Response(status_code=response_status_code)

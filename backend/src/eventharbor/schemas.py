@@ -262,6 +262,7 @@ class ReceiverLabPreset(StrEnum):
     SUCCESS = "success"
     RETRY_THEN_RECOVER = "retry_then_recover"
     RATE_LIMITED = "rate_limited"
+    RATE_LIMIT_THEN_RECOVER = "rate_limit_then_recover"
     TIMEOUT = "timeout"
     PERMANENT_FAILURE = "permanent_failure"
     DEAD_LETTER = "dead_letter"
@@ -290,10 +291,19 @@ class ReceiverLabRequestResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    attempt: int
+    sequence: int = Field(ge=1)
+    attempt: int = Field(ge=1)
     event_id: str | None
+    delivery_id: str | None
+    event_type: str | None
+    delivery_attempt: int | None = Field(ge=1)
+    request_timestamp: int | None = Field(ge=0)
+    received_at: datetime
+    response_status_code: int = Field(ge=100, le=599)
+    receiver_mode: str
     signature_present: bool
     body_preview: str
+    body_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class ReceiverLabStateResponse(BaseModel):
