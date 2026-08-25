@@ -1,6 +1,7 @@
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import eventharbor.database as database_module
 from eventharbor.config import Settings
 from eventharbor.database import build_engine, engine, get_session
 
@@ -23,6 +24,30 @@ def test_build_engine_can_resolve_cached_process_settings() -> None:
     default_engine = build_engine()
 
     assert default_engine.url.drivername == "postgresql+asyncpg"
+
+
+def test_build_engine_passes_explicit_tls_mode_to_asyncpg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_create_async_engine(url: str, **options: object) -> object:
+        captured["url"] = url
+        captured.update(options)
+        return object()
+
+    monkeypatch.setattr(database_module, "create_async_engine", fake_create_async_engine)
+
+    result = database_module.build_engine(
+        Settings(
+            database_url="postgresql+asyncpg://app:password@database/eventharbor",
+            database_ssl_mode="verify-full",
+            _env_file=None,
+        )
+    )
+
+    assert result is not None
+    assert captured["connect_args"] == {"ssl": "verify-full"}
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,339 @@
+name: Publish images and deploy production
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eventharbor-production
+  cancel-in-progress: false
+
+jobs:
+  images:
+    name: Publish immutable images
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      deploy_sha: ${{ steps.release.outputs.deploy_sha }}
+      backend_image: ${{ steps.immutable.outputs.backend_image }}
+      frontend_image: ${{ steps.immutable.outputs.frontend_image }}
+    steps:
+      - name: Resolve release identity
+        id: release
+        env:
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          deploy_sha="${WORKFLOW_RUN_SHA:-${GITHUB_SHA}}"
+          if [[ ! "$deploy_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "The resolved commit is not a full Git SHA." >&2
+            exit 1
+          fi
+
+          repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "deploy_sha=$deploy_sha" >> "$GITHUB_OUTPUT"
+          echo "backend_image=ghcr.io/${repository}-backend:${deploy_sha}" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=ghcr.io/${repository}-frontend:${deploy_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.deploy_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Sign in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish backend image
+        id: backend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.release.outputs.backend_image }}
+          cache-from: type=gha,scope=eventharbor-backend
+          cache-to: type=gha,mode=max,scope=eventharbor-backend
+          provenance: mode=max
+          sbom: true
+
+      - name: Build and publish frontend image
+        id: frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.release.outputs.frontend_image }}
+          build-args: |
+            VITE_RECEIVER_LAB_BASE_URL=http://eventharbor-receiver-prod/webhooks
+          cache-from: type=gha,scope=eventharbor-frontend
+          cache-to: type=gha,mode=max,scope=eventharbor-frontend
+          provenance: mode=max
+          sbom: true
+
+      - name: Record immutable image digests
+        id: immutable
+        env:
+          BACKEND_TAG: ${{ steps.release.outputs.backend_image }}
+          BACKEND_DIGEST: ${{ steps.backend.outputs.digest }}
+          FRONTEND_TAG: ${{ steps.release.outputs.frontend_image }}
+          FRONTEND_DIGEST: ${{ steps.frontend.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$BACKEND_DIGEST"
+          test -n "$FRONTEND_DIGEST"
+          echo "backend_image=${BACKEND_TAG%:*}@${BACKEND_DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=${FRONTEND_TAG%:*}@${FRONTEND_DIGEST}" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Migrate, deploy, and verify
+    needs: images
+    if: vars.AZURE_DEPLOYMENT_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.release.outputs.web_url }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+      NAME_PREFIX: ${{ vars.AZURE_NAME_PREFIX || 'eventharbor' }}
+      ENVIRONMENT_NAME: ${{ vars.AZURE_ENVIRONMENT_NAME || 'prod' }}
+      CONTAINER_APPS_ENVIRONMENT: ${{ vars.AZURE_CONTAINER_APPS_ENVIRONMENT || 'cae-eventharbor-prod' }}
+      APPLICATION_ENVIRONMENT: ${{ vars.EVENTHARBOR_APPLICATION_ENVIRONMENT || 'production' }}
+      DATABASE_URL: ${{ secrets.EVENTHARBOR_DATABASE_URL }}
+      BACKEND_IMAGE: ${{ needs.images.outputs.backend_image }}
+      FRONTEND_IMAGE: ${{ needs.images.outputs.frontend_image }}
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.images.outputs.deploy_sha }}
+
+      - name: Validate deployment configuration
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in \
+            RESOURCE_GROUP CONTAINER_APPS_ENVIRONMENT DATABASE_URL \
+            AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required production setting $name is missing." >&2
+              exit 1
+            fi
+          done
+
+      - name: Sign in to Azure with GitHub OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate infrastructure templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          az bicep build --file infra/azure/foundation.bicep --stdout > /dev/null
+          az bicep build --file infra/azure/migration.bicep --stdout > /dev/null
+          az bicep build --file infra/azure/apps.bicep --stdout > /dev/null
+
+      - name: Create or update the migration job
+        id: migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          job_name="$(az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "migration-${GITHUB_RUN_ID}" \
+            --template-file infra/azure/migration.bicep \
+            --parameters \
+              namePrefix="$NAME_PREFIX" \
+              environmentName="$ENVIRONMENT_NAME" \
+              containerAppsEnvironmentName="$CONTAINER_APPS_ENVIRONMENT" \
+              backendImage="$BACKEND_IMAGE" \
+              databaseUrl="$DATABASE_URL" \
+              applicationEnvironment="$APPLICATION_ENVIRONMENT" \
+            --query properties.outputs.migrationJobName.value \
+            --output tsv \
+            --only-show-errors)"
+          test -n "$job_name"
+          echo "job_name=$job_name" >> "$GITHUB_OUTPUT"
+
+      - name: Apply database migrations and wait for success
+        env:
+          MIGRATION_JOB: ${{ steps.migration.outputs.job_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          execution_name="$(az containerapp job start \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$MIGRATION_JOB" \
+            --query name \
+            --output tsv \
+            --only-show-errors)"
+          test -n "$execution_name"
+
+          for _ in {1..60}; do
+            execution_status="$(az containerapp job execution show \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$MIGRATION_JOB" \
+              --job-execution-name "$execution_name" \
+              --query properties.status \
+              --output tsv \
+              --only-show-errors)"
+            case "$execution_status" in
+              Succeeded)
+                echo "Database migration succeeded."
+                exit 0
+                ;;
+              Failed|Canceled)
+                echo "Database migration ended with status $execution_status." >&2
+                exit 1
+                ;;
+            esac
+            sleep 10
+          done
+
+          echo "Database migration did not finish within ten minutes." >&2
+          exit 1
+
+      - name: Record the currently deployed images
+        id: previous
+        shell: bash
+        run: |
+          set -euo pipefail
+          web_app="${NAME_PREFIX}-web-${ENVIRONMENT_NAME}"
+          api_app="${NAME_PREFIX}-api-${ENVIRONMENT_NAME}"
+
+          previous_frontend="$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$web_app" \
+            --query 'properties.template.containers[0].image' --output tsv \
+            --only-show-errors 2>/dev/null || true)"
+          previous_backend="$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$api_app" \
+            --query 'properties.template.containers[0].image' --output tsv \
+            --only-show-errors 2>/dev/null || true)"
+
+          echo "frontend_image=$previous_frontend" >> "$GITHUB_OUTPUT"
+          echo "backend_image=$previous_backend" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy the application revision
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          web_url="$(az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "apps-${GITHUB_RUN_ID}" \
+            --template-file infra/azure/apps.bicep \
+            --parameters \
+              namePrefix="$NAME_PREFIX" \
+              environmentName="$ENVIRONMENT_NAME" \
+              containerAppsEnvironmentName="$CONTAINER_APPS_ENVIRONMENT" \
+              frontendImage="$FRONTEND_IMAGE" \
+              backendImage="$BACKEND_IMAGE" \
+              databaseUrl="$DATABASE_URL" \
+              applicationEnvironment="$APPLICATION_ENVIRONMENT" \
+              webMinReplicas=0 webMaxReplicas=1 \
+              apiMinReplicas=0 apiMaxReplicas=2 \
+              workerMinReplicas=1 workerMaxReplicas=1 \
+              receiverMinReplicas=0 receiverMaxReplicas=1 \
+            --query properties.outputs.webAppUrl.value \
+            --output tsv \
+            --only-show-errors)"
+          test -n "$web_url"
+          echo "web_url=$web_url" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the live release
+        id: smoke
+        continue-on-error: true
+        env:
+          WEB_URL: ${{ steps.release.outputs.web_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          paths=("/healthz" "/api/health" "/api/ready" "/api/v1/control-room/overview")
+
+          for path in "${paths[@]}"; do
+            ready=false
+            for _ in {1..24}; do
+              if curl \
+                --fail \
+                --silent \
+                --show-error \
+                --connect-timeout 5 \
+                --max-time 15 \
+                "${WEB_URL}${path}" > /dev/null; then
+                ready=true
+                break
+              fi
+              sleep 5
+            done
+            if [[ "$ready" != true ]]; then
+              echo "Smoke test failed for ${WEB_URL}${path}." >&2
+              exit 1
+            fi
+          done
+
+      - name: Restore the previous application images after a failed smoke test
+        if: steps.smoke.outcome == 'failure' && steps.previous.outputs.frontend_image != '' && steps.previous.outputs.backend_image != ''
+        env:
+          PREVIOUS_FRONTEND_IMAGE: ${{ steps.previous.outputs.frontend_image }}
+          PREVIOUS_BACKEND_IMAGE: ${{ steps.previous.outputs.backend_image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "rollback-${GITHUB_RUN_ID}" \
+            --template-file infra/azure/apps.bicep \
+            --parameters \
+              namePrefix="$NAME_PREFIX" \
+              environmentName="$ENVIRONMENT_NAME" \
+              containerAppsEnvironmentName="$CONTAINER_APPS_ENVIRONMENT" \
+              frontendImage="$PREVIOUS_FRONTEND_IMAGE" \
+              backendImage="$PREVIOUS_BACKEND_IMAGE" \
+              databaseUrl="$DATABASE_URL" \
+              applicationEnvironment="$APPLICATION_ENVIRONMENT" \
+              webMinReplicas=0 webMaxReplicas=1 \
+              apiMinReplicas=0 apiMaxReplicas=2 \
+              workerMinReplicas=1 workerMaxReplicas=1 \
+              receiverMinReplicas=0 receiverMaxReplicas=1 \
+            --only-show-errors \
+            --output none
+
+      - name: Fail the workflow when verification failed
+        if: steps.smoke.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "The new revision failed live verification. Previous images were restored when available." >&2
+          exit 1

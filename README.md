@@ -10,11 +10,13 @@ failures, and dead-letters exhausted deliveries. If a worker crashes during the
 indeterminate window around an HTTP request, its expired lease is resolved and
 the event is redelivered while the configured attempt budget remains.
 
-> Project status: reliability engine and recruiter demo complete. PostgreSQL
+> Project status: reliability engine and recruiter demo complete; Azure release
+> path prepared but not provisioned from this repository copy. PostgreSQL
 > persistence, idempotent ingestion, signed delivery, retry scheduling, attempt
 > evidence, expired-lease crash recovery, and operator-approved replay are
-> visible through the React Control Room. Workspace isolation, production
-> security hardening, observability, and cloud delivery remain future milestones.
+> visible through the React Control Room. The cloud templates keep the API,
+> worker, Receiver Lab, and database off the public internet. Tenant isolation
+> and deeper observability remain future milestones.
 
 ## Target signature demonstration
 
@@ -55,7 +57,8 @@ The core guarantees and limitations are documented in
 - Nginx serves the production frontend and proxies same-origin `/api` requests.
 - Docker Compose starts PostgreSQL, migrations, API, worker, Receiver Lab, and
   the frontend.
-- OpenTelemetry, Azure, Key Vault, and Terraform are later milestones.
+- Azure Bicep defines a cost-focused Container Apps and private PostgreSQL
+  deployment; GitHub Actions publishes immutable images and deploys through OIDC.
 
 The initial system is a modular monolith with independent API and worker
 processes. It deliberately avoids Kafka, Kubernetes, and premature
@@ -123,6 +126,17 @@ For Vite development with hot reload, leave the backend services running and
 use `npm run dev`, then open <http://localhost:5173>. Both Vite and Nginx proxy
 relative `/api` requests to FastAPI.
 
+## Deploy the public demo
+
+The cloud release is intentionally separate from local Docker Compose. Start with
+[`docs/deployment.md`](docs/deployment.md), which covers the cost boundary,
+passwordless GitHub-to-Azure authentication, the first release, and the
+`eventharbor.irfanburakozer.com` Cloudflare records. Use
+[`docs/operations.md`](docs/operations.md) for health checks, logs, rollback,
+cost-saving modes, and permanent removal.
+
+No cloud resources are created merely by cloning or building this repository.
+
 ## Repository map
 
 ```text
@@ -130,8 +144,9 @@ backend/                 FastAPI applications and delivery-domain code
 frontend/                React Control Room and Nginx container
 docs/                    Product, architecture, guarantees, and decisions
 docs/adr/                Architecture decision records
-infra/                   Azure infrastructure (later milestone)
-.github/workflows/       Continuous integration
+infra/azure/             Azure Bicep templates and deployment contract
+scripts/azure/           One-time foundation, OIDC, and DNS helper scripts
+.github/workflows/       Continuous integration and gated production release
 compose.yaml             Local services
 ```
 
@@ -143,7 +158,7 @@ compose.yaml             Local services
 4. Demo: live control room, deterministic failure controls, attempt timeline (complete)
 5. Security: tenant isolation, API keys, secret rotation, endpoint verification, SSRF controls
 6. Operations: OpenTelemetry, dashboards, alerts, load and recovery reports
-7. Cloud: Azure deployment and Terraform
+7. Cloud: Azure Bicep and gated GitHub OIDC deployment (prepared; launch is operator-controlled)
 8. Diagnostics: evidence-linked, read-only failure investigator with human-approved actions
 
 Only measured results will be published. Benchmark reports will include the

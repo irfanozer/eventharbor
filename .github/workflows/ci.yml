@@ -86,6 +86,10 @@ jobs:
         working-directory: frontend
         run: npm test
 
+      - name: Validate production container configuration
+        working-directory: frontend
+        run: npm run test:runtime-config
+
       - name: Build
         working-directory: frontend
         run: npm run build

@@ -1,9 +1,23 @@
 import { describe, expect, it } from "vitest";
 
-import { isExpectedSchemaRejection } from "./demoEvents";
+import { isExpectedSchemaRejection, resolveReceiverLabBaseUrl } from "./demoEvents";
 import type { Delivery, DeliveryAttempt } from "./types";
 
 const now = "2026-08-25T12:00:00Z";
+
+describe("Receiver Lab URL configuration", () => {
+  it("uses the local service URL when no build-time override is set", () => {
+    expect(resolveReceiverLabBaseUrl(undefined)).toBe(
+      "http://receiver-lab:8100/webhooks",
+    );
+  });
+
+  it("normalizes a build-time override before endpoint paths are appended", () => {
+    expect(resolveReceiverLabBaseUrl("  http://eventharbor-receiver/webhooks///  ")).toBe(
+      "http://eventharbor-receiver/webhooks",
+    );
+  });
+});
 
 function stoppedDelivery(): Delivery {
   return {

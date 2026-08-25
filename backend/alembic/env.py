@@ -9,14 +9,15 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 from eventharbor import models as models  # noqa: F401
 from eventharbor.config import get_settings
-from eventharbor.database import Base
+from eventharbor.database import Base, database_connect_args
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+settings = get_settings()
+config.set_main_option("sqlalchemy.url", settings.database_url)
 target_metadata = Base.metadata
 
 
@@ -51,6 +52,7 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args=database_connect_args(settings),
     )
 
     async with connectable.connect() as connection:

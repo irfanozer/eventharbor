@@ -87,6 +87,36 @@ presets. The browser cannot submit an arbitrary receiver URL or raw failure
 configuration. Endpoint query responses omit signing secrets, and the browser
 does not retain the one-time secret returned during local endpoint creation.
 
+## Azure public-demo topology
+
+The prepared cloud deployment keeps the existing same-origin boundary while
+replacing Docker Compose service networking with Azure Container Apps service
+discovery:
+
+```text
+Cloudflare DNS
+      |
+      v
+public Nginx/React app :8080
+      |
+      +-- /api/* --> internal FastAPI app :8000 --> private PostgreSQL
+                           |                         ^
+                           v                         |
+                  internal Receiver Lab :8100 <--- worker (no ingress)
+
+manual migration job ----------------------------> PostgreSQL
+daily bounded retention job ----------------------> PostgreSQL
+```
+
+Only the web app has external ingress. PostgreSQL uses a delegated subnet and
+private DNS, API readiness includes a bounded database query, and every deployed
+database process requires TLS. The web/API/Receiver Lab can scale to zero in the
+cost-focused release; the polling worker remains at one replica because it has no
+external scaling signal. Receiver Lab is capped at one replica because its
+short-lived scenario state is deliberately in process memory.
+
+See [`deployment.md`](deployment.md) and [`operations.md`](operations.md).
+
 See [`control-room.md`](control-room.md) for browser routes, API routes, and the
 guided failure-repair-replay sequence.
 

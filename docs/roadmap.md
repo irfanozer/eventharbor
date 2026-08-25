@@ -36,19 +36,24 @@
 
 ## Milestone 5: security and operations
 
-- Workspace isolation and scoped API keys
-- Endpoint verification and secret rotation
-- SSRF and DNS-rebinding controls
-- OpenTelemetry traces, metrics, dashboards, and alerts
-- Reproducible load, retry-storm, and crash-recovery reports
+- [x] Exact Receiver Lab destination allow-list and redirect blocking
+- [x] Public-edge request ceiling, mutation rate limits, and security headers
+- [x] Production configuration invariants, PostgreSQL TLS, and readiness probes
+- [x] Scheduled, bounded synthetic-event retention cleanup
+- [ ] Workspace isolation and scoped API keys
+- [ ] Endpoint verification and secret rotation
+- [ ] OpenTelemetry traces, metrics, dashboards, and alerts
+- [ ] Reproducible load, retry-storm, and crash-recovery reports
 
 ## Milestone 6: Azure deployment
 
-- Azure Container Apps
-- Azure Database for PostgreSQL
-- Azure Key Vault
-- Terraform and deployment runbook
-- Synthetic monitoring and documented monthly cost
+- [x] Azure Container Apps Bicep templates with private internal services
+- [x] Private Azure Database for PostgreSQL Flexible Server
+- [x] Manual migration job and daily cleanup job
+- [x] Immutable GHCR images and passwordless GitHub OIDC release workflow
+- [x] Cloudflare custom-domain, cost, rollback, and operations runbooks
+- [ ] Provision the operator-controlled Azure resources
+- [ ] Bind `eventharbor.irfanburakozer.com` and publish measured monthly cost
 
 ## Milestone 7: failure investigator
 

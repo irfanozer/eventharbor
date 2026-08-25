@@ -6,7 +6,16 @@ import type {
   DemoEventTypeId,
 } from "./types";
 
-export const RECEIVER_LAB_BASE_URL = "http://receiver-lab:8100/webhooks";
+const DEFAULT_RECEIVER_LAB_BASE_URL = "http://receiver-lab:8100/webhooks";
+
+export function resolveReceiverLabBaseUrl(configuredUrl: string | undefined): string {
+  const normalizedUrl = configuredUrl?.trim().replace(/\/+$/, "");
+  return normalizedUrl || DEFAULT_RECEIVER_LAB_BASE_URL;
+}
+
+export const RECEIVER_LAB_BASE_URL = resolveReceiverLabBaseUrl(
+  import.meta.env.VITE_RECEIVER_LAB_BASE_URL,
+);
 
 export interface DemoEventField {
   key: string;
