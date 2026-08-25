@@ -62,8 +62,7 @@ class ReceiverLabDemoService:
             if not isinstance(raw_requests, list):
                 raise TypeError("receiver requests must be a list")
             requests = [
-                ReceiverLabRequestResponse.model_validate(item)
-                for item in raw_requests[-20:]
+                ReceiverLabRequestResponse.model_validate(item) for item in raw_requests[-20:]
             ]
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
             raise self._unavailable() from exc

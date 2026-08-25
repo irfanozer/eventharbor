@@ -401,13 +401,15 @@ async def test_dead_letter_list_explains_replay_eligibility(
     async def fake_dead_letters(service, **kwargs):
         assert kwargs == {"limit": 25, "cursor": None, "endpoint_id": endpoint.id}
         return Page(
-            items=[DeadLetterRecord(
-                event=event,
-                delivery=delivery,
-                endpoint=endpoint,
-                last_http_status_code=last_http_status_code,
-                last_response_body_excerpt=last_response_body_excerpt,
-            )],
+            items=[
+                DeadLetterRecord(
+                    event=event,
+                    delivery=delivery,
+                    endpoint=endpoint,
+                    last_http_status_code=last_http_status_code,
+                    last_response_body_excerpt=last_response_body_excerpt,
+                )
+            ],
             next_cursor=None,
         )
 

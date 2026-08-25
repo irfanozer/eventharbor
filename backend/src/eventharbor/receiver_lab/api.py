@@ -19,6 +19,7 @@ MAX_SCOPED_RUNS = 100
 MAX_REQUESTS_PER_RUN = 100
 CONTROL_REQUEST_LIMIT = 20
 
+
 class ReceiverContract(TypedDict):
     route: str
     required_text: tuple[str, ...]
@@ -247,9 +248,7 @@ async def receive_webhook(
     delivery_id: Annotated[str | None, Header(alias="X-EventHarbor-Delivery-Id")] = None,
     event_type: Annotated[str | None, Header(alias="X-EventHarbor-Event-Type")] = None,
     delivery_attempt: Annotated[int | None, Header(alias="X-EventHarbor-Attempt")] = None,
-    request_timestamp: Annotated[
-        int | None, Header(alias="X-EventHarbor-Timestamp")
-    ] = None,
+    request_timestamp: Annotated[int | None, Header(alias="X-EventHarbor-Timestamp")] = None,
     signature: Annotated[str | None, Header(alias="X-EventHarbor-Signature")] = None,
     demo_run_id: Annotated[
         str | None,
@@ -276,8 +275,7 @@ async def receive_webhook(
             body,
             receiver_channel,
             validate_unknown=(
-                receiver_channel is not None
-                or configuration.mode == ReceiverMode.PERMANENT_FAILURE
+                receiver_channel is not None or configuration.mode == ReceiverMode.PERMANENT_FAILURE
             ),
         )
 
@@ -291,9 +289,7 @@ async def receive_webhook(
                 or attempt <= configuration.failures_before_success
             )
             response_status_code = (
-                status.HTTP_429_TOO_MANY_REQUESTS
-                if rate_limit_active
-                else status.HTTP_200_OK
+                status.HTTP_429_TOO_MANY_REQUESTS if rate_limit_active else status.HTTP_200_OK
             )
         elif (
             configuration.mode == ReceiverMode.FAIL_THEN_SUCCEED
@@ -331,9 +327,7 @@ async def receive_webhook(
     if configuration.mode == ReceiverMode.TIMEOUT:
         await asyncio.sleep(configuration.delay_ms / 1_000)
     headers = (
-        {"Retry-After": "2"}
-        if response_status_code == status.HTTP_429_TOO_MANY_REQUESTS
-        else None
+        {"Retry-After": "2"} if response_status_code == status.HTTP_429_TOO_MANY_REQUESTS else None
     )
     return JSONResponse(
         status_code=response_status_code,
