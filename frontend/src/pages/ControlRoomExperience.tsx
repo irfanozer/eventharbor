@@ -624,6 +624,14 @@ export function ControlRoomExperience() {
             Choose a business event and a real Receiver Lab route. EventHarbor stores it in PostgreSQL before
             a background worker sends the webhook. The receiver&apos;s actual HTTP response drives every status you see.
           </p>
+          <a className="hero-demo-direction" href="#interactive-demo">
+            <span>
+              <small>Try it yourself</small>
+              <strong className="hero-demo-direction__wide">The interactive demo is on the right</strong>
+              <strong className="hero-demo-direction__narrow">The interactive demo continues below</strong>
+            </span>
+            <i aria-hidden="true">→</i>
+          </a>
           <div className="plain-flow" aria-label="The event moves from this browser through EventHarbor to Receiver Lab">
             <span>Browser UI</span><i aria-hidden="true">→</i><strong>Store + deliver</strong><i aria-hidden="true">→</i><span>Receiver Lab</span>
           </div>
@@ -633,6 +641,7 @@ export function ControlRoomExperience() {
         </div>
 
         <form
+          id="interactive-demo"
           className="scenario-panel event-composer"
           aria-labelledby="event-composer-title"
           onSubmit={(event) => {
@@ -659,6 +668,10 @@ export function ControlRoomExperience() {
             </div>
           ) : null}
 
+          <div className="scenario-picker-intro">
+            <h3>Test cases</h3>
+            <p>Choose one controlled receiver behavior. Each case produces real HTTP responses and stored delivery evidence.</p>
+          </div>
           <div className="scenario-picker" role="group" aria-label="Receiver incident">
             {DEMO_SCENARIOS.map((scenario) => (
               <button

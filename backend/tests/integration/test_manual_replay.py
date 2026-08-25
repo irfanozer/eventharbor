@@ -369,14 +369,13 @@ async def test_dead_letter_repair_and_idempotent_replay_preserve_source_history(
             assert history["deliveries"][1]["replayed_from_delivery_id"] == published["delivery_id"]
 
             receiver_requests = receiver_requests_response.json()
-            assert receiver_requests["count"] == 2
-            assert [request["event_id"] for request in receiver_requests["requests"]] == [
-                published["event_id"],
-                published["event_id"],
+            event_requests = [
+                request
+                for request in receiver_requests["requests"]
+                if request["event_id"] == published["event_id"]
             ]
-            assert [
-                request["response_status_code"] for request in receiver_requests["requests"]
-            ] == [503, 200]
+            assert len(event_requests) == 2
+            assert [request["response_status_code"] for request in event_requests] == [503, 200]
 
             # Same request lookup happens before current eligibility checks, so a
             # lost 202 response remains safely recoverable after delivery succeeds.

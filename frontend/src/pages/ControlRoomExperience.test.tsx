@@ -160,6 +160,8 @@ describe("ControlRoomExperience", () => {
       </QueryClientProvider>,
     );
 
+    expect(screen.getByText(/the interactive demo is on the right/i)).toBeVisible();
+    expect(screen.getByRole("heading", { name: /test cases/i })).toBeVisible();
     expect(screen.getByRole("heading", { name: /choose the failure. then send the event/i })).toBeVisible();
     expect(await screen.findByRole("heading", { name: /recovery replay reached receiver lab/i })).toBeVisible();
     expect(screen.getByRole("heading", { name: "ORDER-PRESERVED" })).toBeVisible();
