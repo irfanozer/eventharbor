@@ -165,8 +165,9 @@ describe("ControlRoomExperience", () => {
     expect(sessionStorage.getItem("eventharbor.control-room.tour")).toContain(eventId);
 
     fireEvent.click(screen.getByRole("button", { name: /receiver rejects invalid data/i }));
-    expect(screen.getByText(/returns HTTP 400 once/i)).toBeVisible();
-    expect(screen.getByText(/original delivery stopped and stays preserved/i)).toBeVisible();
+    expect(screen.getByText(/data.customer_id is missing/i)).toBeVisible();
+    expect(screen.getByText(/intentionally has no data.customer_id/i)).toBeVisible();
+    expect(screen.getByText(/original delivery stays stopped and preserved/i)).toBeVisible();
     await waitFor(() => expect(api.getEvent).toHaveBeenCalledWith(eventId));
   });
 });

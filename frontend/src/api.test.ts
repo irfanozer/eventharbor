@@ -135,6 +135,31 @@ describe("Reliability story idempotency", () => {
     });
   });
 
+  it("sends the permanent-rejection demo without the receiver's required customer field", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      event_id: "event-1",
+      delivery_id: "delivery-0",
+      endpoint_id: "endpoint-1",
+      type: "demo.order.paid",
+      status: "pending",
+      created_at: now,
+    }, 202));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await publishDemoEvent(
+      "endpoint-1",
+      "validation-run",
+      "validation-publish-key",
+      { order_id: "ORDER-INVALID", amount_cents: 12_900, note: "Missing customer" },
+      "permanent_rejection",
+    );
+
+    const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(String(request.body)) as { data: Record<string, unknown> };
+    expect(body.data.scenario).toBe("permanent_rejection");
+    expect(body.data).not.toHaveProperty("customer_id");
+  });
+
   it("replays with the caller's stable key", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
       source_delivery_id: "delivery-0",

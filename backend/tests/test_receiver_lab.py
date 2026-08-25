@@ -62,6 +62,58 @@ async def test_receiver_can_rate_limit_twice_then_recover() -> None:
 
 
 @pytest.mark.asyncio
+async def test_permanent_rejection_names_the_missing_field_and_accepts_corrected_data() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.put(
+            "/control?run_id=validation-demo",
+            json={"mode": "permanent_failure", "failures_before_success": 0, "delay_ms": 0},
+        )
+
+        rejected = await client.post(
+            "/webhooks",
+            json={"type": "demo.order.paid", "data": {"order_id": "ORDER-1"}},
+            headers={"X-EventHarbor-Demo-Run-Id": "validation-demo"},
+        )
+        accepted = await client.post(
+            "/webhooks",
+            json={
+                "type": "demo.order.paid",
+                "data": {"order_id": "ORDER-2", "customer_id": "CUS-42"},
+            },
+            headers={"X-EventHarbor-Demo-Run-Id": "validation-demo"},
+        )
+        evidence = (await client.get("/requests?run_id=validation-demo")).json()["requests"]
+
+    assert rejected.status_code == 400
+    assert rejected.json() == {
+        "code": "missing_customer_id",
+        "detail": "data.customer_id is required.",
+    }
+    assert accepted.status_code == 200
+    assert [item["response_status_code"] for item in evidence] == [400, 200]
+    assert "customer_id" not in evidence[0]["body_preview"]
+    assert "CUS-42" in evidence[1]["body_preview"]
+
+
+@pytest.mark.asyncio
+async def test_permanent_rejection_reports_malformed_json_honestly() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.put(
+            "/control",
+            json={"mode": "permanent_failure", "failures_before_success": 0, "delay_ms": 0},
+        )
+        response = await client.post("/webhooks", content=b"not-json")
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "code": "invalid_json",
+        "detail": "The webhook body must be valid JSON.",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "expected_status"),
     [

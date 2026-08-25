@@ -314,7 +314,7 @@ export async function runReliabilityTour(
       if (selectedScenario.strategy === "terminal" && source.status === "dead_lettered") {
         report(
           "verified",
-          "HTTP 400 was classified as permanent, so EventHarbor stopped after one request instead of retrying bad data.",
+          "Receiver Lab returned HTTP 400 because data.customer_id is missing. EventHarbor classified the unchanged request as non-retryable and stopped after one attempt.",
           event,
         );
         return result();
@@ -365,7 +365,7 @@ export async function runReliabilityTour(
       );
       await pauseForPresentation();
 
-      report("repairing", "Checking Receiver Lab before applying the success preset.", event);
+      report("repairing", "Changing only this Receiver Lab run from HTTP 503 to HTTP 200, simulating a destination that recovered after a restart or fixed deployment.", event);
       const receiver = await dependencies.getReceiverLab(runId);
       if (receiver.preset !== "success") {
         const repaired = await dependencies.setReceiverLabPreset("success", runId);
@@ -392,7 +392,7 @@ export async function runReliabilityTour(
         return fail("The recovery replay is not linked to the original delivery.", event);
       }
       if (currentReplay.status !== "delivered" && currentReplay.status !== "dead_lettered") {
-        report("repairing", "Verifying Receiver Lab before the active replay continues.", event);
+        report("repairing", "Confirming that this Receiver Lab run now returns HTTP 200 before the separate replay continues.", event);
         const receiver = await dependencies.getReceiverLab(runId);
         if (receiver.preset !== "success") {
           const repaired = await dependencies.setReceiverLabPreset("success", runId);

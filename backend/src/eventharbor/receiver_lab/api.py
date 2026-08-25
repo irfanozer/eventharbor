@@ -1,6 +1,7 @@
 """Safe, deterministic webhook receiver for development and demos."""
 
 import asyncio
+import json
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ from hashlib import sha256
 from typing import Annotated
 
 from fastapi import FastAPI, Header, Query, Request, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from eventharbor.demo_runs import DEMO_RUN_ID_MAX_LENGTH, DEMO_RUN_ID_PATTERN
@@ -140,6 +142,37 @@ async def list_requests(
         return {"count": len(run.requests), "requests": list(run.requests)}
 
 
+def _payload_validation_error(body: bytes) -> tuple[str, str] | None:
+    """Return the concrete Receiver Lab schema violation, if any."""
+
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return "invalid_json", "The webhook body must be valid JSON."
+    if not isinstance(payload, dict):
+        return "invalid_payload", "The webhook body must be a JSON object."
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return "invalid_data", "data must be a JSON object."
+    customer_id = data.get("customer_id")
+    if not isinstance(customer_id, str) or not customer_id.strip():
+        return "missing_customer_id", "data.customer_id is required."
+    return None
+
+
+def _response_evidence(
+    status_code: int,
+    validation_error: tuple[str, str] | None,
+) -> tuple[str, str]:
+    if validation_error is not None:
+        return validation_error
+    if status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+        return "rate_limited", "Receiver Lab asked the worker to retry after 2 seconds."
+    if status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+        return "temporarily_unavailable", "Receiver Lab is in the controlled unavailable state."
+    return "accepted", "Receiver Lab accepted the webhook."
+
+
 @app.post("/webhooks", tags=["receiver lab"])
 async def receive_webhook(
     request: Request,
@@ -162,6 +195,7 @@ async def receive_webhook(
 ) -> Response:
     body = await request.body()
     received_at = datetime.now(UTC)
+    validation_error: tuple[str, str] | None = None
 
     async with receiver.lock:
         run = receiver.webhook_state(demo_run_id)
@@ -184,7 +218,12 @@ async def receive_webhook(
                 else status.HTTP_200_OK
             )
         elif configuration.mode == ReceiverMode.PERMANENT_FAILURE:
-            response_status_code = status.HTTP_400_BAD_REQUEST
+            validation_error = _payload_validation_error(body)
+            response_status_code = (
+                status.HTTP_400_BAD_REQUEST
+                if validation_error is not None
+                else status.HTTP_200_OK
+            )
         elif (
             configuration.mode == ReceiverMode.FAIL_THEN_SUCCEED
             and attempt <= configuration.failures_before_success
@@ -192,6 +231,11 @@ async def receive_webhook(
             response_status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         else:
             response_status_code = status.HTTP_200_OK
+
+        response_code, response_detail = _response_evidence(
+            response_status_code,
+            validation_error,
+        )
 
         run.requests.append(
             {
@@ -214,7 +258,13 @@ async def receive_webhook(
 
     if configuration.mode == ReceiverMode.TIMEOUT:
         await asyncio.sleep(configuration.delay_ms / 1_000)
-        return Response(status_code=response_status_code)
-    if response_status_code == status.HTTP_429_TOO_MANY_REQUESTS:
-        return Response(status_code=response_status_code, headers={"Retry-After": "2"})
-    return Response(status_code=response_status_code)
+    headers = (
+        {"Retry-After": "2"}
+        if response_status_code == status.HTTP_429_TOO_MANY_REQUESTS
+        else None
+    )
+    return JSONResponse(
+        status_code=response_status_code,
+        content={"code": response_code, "detail": response_detail},
+        headers=headers,
+    )

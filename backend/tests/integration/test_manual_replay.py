@@ -1,6 +1,7 @@
 """End-to-end proof that manual replay appends history instead of rewriting it."""
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -257,6 +258,10 @@ async def test_dead_letter_repair_and_idempotent_replay_preserve_source_history(
             assert len(source_before["attempts"]) == 1
             assert source_before["attempts"][0]["disposition"] == "terminal_failure"
             assert source_before["attempts"][0]["http_status_code"] == 400
+            assert json.loads(source_before["attempts"][0]["response_body_excerpt"]) == {
+                "code": "missing_customer_id",
+                "detail": "data.customer_id is required.",
+            }
 
             missing = await api.post(
                 f"/v1/deliveries/{uuid4()}/replays",
@@ -363,8 +368,14 @@ async def test_dead_letter_repair_and_idempotent_replay_preserve_source_history(
             assert history["deliveries"][1]["replayed_from_delivery_id"] == published["delivery_id"]
 
             receiver_requests = receiver_requests_response.json()
-            assert receiver_requests["count"] == 1
-            assert receiver_requests["requests"][0]["event_id"] == published["event_id"]
+            assert receiver_requests["count"] == 2
+            assert [request["event_id"] for request in receiver_requests["requests"]] == [
+                published["event_id"],
+                published["event_id"],
+            ]
+            assert [
+                request["response_status_code"] for request in receiver_requests["requests"]
+            ] == [400, 200]
 
             # Same request lookup happens before current eligibility checks, so a
             # lost 202 response remains safely recoverable after delivery succeeds.

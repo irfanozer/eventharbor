@@ -301,7 +301,8 @@ describe("runReliabilityTour", () => {
 
     expect(result.phase).toBe("verified");
     expect(result.attemptCount).toBe(1);
-    expect(result.message).toContain("stopped after one request");
+    expect(result.message).toContain("data.customer_id is missing");
+    expect(result.message).toContain("stopped after one attempt");
     expect(setReceiverLabPreset).toHaveBeenCalledWith("permanent_failure", "run-1");
     expect(deps.replayDelivery).not.toHaveBeenCalled();
   });

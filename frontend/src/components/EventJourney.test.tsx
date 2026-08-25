@@ -36,6 +36,7 @@ function attempt(
   number: number,
   status: number,
   disposition: DeliveryAttempt["disposition"] = status === 200 ? "succeeded" : "retry",
+  responseBody: string | null = null,
 ): DeliveryAttempt {
   return {
     id,
@@ -45,7 +46,7 @@ function attempt(
     http_status_code: status,
     error_type: null,
     error_message: null,
-    response_body_excerpt: null,
+    response_body_excerpt: responseBody,
     duration_ms: 7,
     request_timestamp: 1_777_070_400 + number,
     retry_scheduled_for: null,
@@ -139,11 +140,11 @@ describe("EventJourney", () => {
 
     expect(screen.getByRole("heading", { name: /recovery replay reached receiver lab/i })).toBeVisible();
     expect(screen.getByText(/replay request 1 received HTTP 200/i)).toBeVisible();
-    expect(screen.getByText(/original delivery stopped and stays preserved/i)).toBeVisible();
+    expect(screen.getByText(/original delivery stays stopped and preserved/i)).toBeVisible();
     const originalHistory = screen.getByLabelText("Original delivery actual request history");
     expect(within(originalHistory).getAllByText("HTTP 503")).toHaveLength(4);
     expect(screen.getByText("POST /api/v1/events")).toBeVisible();
-    expect(screen.getByText("Docker network · postgres:5432")).toBeVisible();
+    expect(screen.getByText("Docker service · postgres:5432")).toBeVisible();
     expect(screen.queryByText(/generation 0|generation 1|\bG0\b|\bG1\b/i)).not.toBeInTheDocument();
     expect(screen.getByText("✓ Exact byte match")).toBeVisible();
   });
@@ -183,7 +184,13 @@ describe("EventJourney", () => {
         event={event(original)}
         originalDelivery={original}
         replayDelivery={null}
-        originalAttempts={[attempt("g0-1", 1, 400, "terminal_failure")]}
+        originalAttempts={[attempt(
+          "g0-1",
+          1,
+          400,
+          "terminal_failure",
+          '{"code":"missing_customer_id","detail":"data.customer_id is required."}',
+        )]}
         replayAttempts={[]}
         receiverObservations={[observation(1, original.id, 1, 400)]}
         repairOccurred={false}
@@ -192,6 +199,9 @@ describe("EventJourney", () => {
     );
 
     expect(screen.getByRole("heading", { name: /HTTP 400 stopped after one request/i })).toBeVisible();
+    expect(screen.getByText(/intentionally omits it/i)).toBeVisible();
+    expect(screen.getAllByText("data.customer_id is required.")[0]).toBeVisible();
+    expect(screen.getByText("Stopped · not retryable")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /correctly stopped. no useless retries/i })).toBeVisible();
     expect(screen.queryByText(/new replay/i)).not.toBeInTheDocument();
   });

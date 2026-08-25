@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 
 import type { DemoScenario } from "../demoScenarios";
 import type { ReliabilityTourPhase } from "../reliabilityTour";
@@ -108,6 +108,50 @@ function attemptOutcome(attempt: DeliveryAttempt): string {
   return "NO RESPONSE";
 }
 
+function responseBodyDetail(attempt: DeliveryAttempt): string | null {
+  const excerpt = attempt.response_body_excerpt?.trim();
+  if (!excerpt) return null;
+  try {
+    const parsed = JSON.parse(excerpt) as unknown;
+    if (parsed && typeof parsed === "object") {
+      const detail = (parsed as Record<string, unknown>).detail;
+      if (typeof detail === "string" && detail.trim()) return detail;
+    }
+  } catch {
+    // A plain-text receiver response is already a useful detail.
+  }
+  return excerpt;
+}
+
+function attemptDecision(exchange: Exchange): { label: string; detail: string } {
+  const { attempt, delivery } = exchange;
+  const responseDetail = responseBodyDetail(attempt);
+  if (attempt.status === "in_progress") {
+    return { label: "Request in flight", detail: "Waiting for Receiver Lab" };
+  }
+  if (attempt.http_status_code !== null && attempt.http_status_code >= 200 && attempt.http_status_code < 300) {
+    return { label: "Delivered", detail: responseDetail ?? "Receiver accepted the webhook" };
+  }
+  if (attempt.disposition === "terminal_failure") {
+    return { label: "Stopped · not retryable", detail: responseDetail ?? "Retrying cannot change the request body" };
+  }
+  if (delivery.status === "dead_lettered" && attempt.attempt_number === delivery.attempt_count) {
+    return { label: "Retry budget exhausted", detail: responseDetail ?? "No further automatic request" };
+  }
+  if (attempt.http_status_code === 429) {
+    return {
+      label: "Retry scheduled",
+      detail: attempt.retry_scheduled_for
+        ? `Next try: ${timestampFrom(attempt.retry_scheduled_for).label}`
+        : responseDetail ?? "Receiver requested a slower delivery rate",
+    };
+  }
+  if (attempt.disposition === "retry") {
+    return { label: "Retry scheduled", detail: responseDetail ?? "Temporary failure" };
+  }
+  return { label: "Recorded", detail: responseDetail ?? "No additional response detail" };
+}
+
 function responseTone(status: number | null | undefined): JourneyTone {
   if (status === undefined || status === null) return "active";
   if (status >= 200 && status < 300) return "success";
@@ -205,9 +249,9 @@ function journeyView(
     return {
       location: "receiver",
       tone: "active",
-      label: "CONTROL PLANE · REPAIRING",
-      headline: "This isolated receiver is changing from HTTP 503 to HTTP 200.",
-      explanation: "The original delivery remains stopped. Repairing a destination does not silently restart old work.",
+      label: "RECEIVER LAB · CHANGING RESPONSE",
+      headline: "Receiver Lab will accept the next webhook.",
+      explanation: "This isolated test run now returns HTTP 200 instead of HTTP 503, simulating a destination coming back after a restart or fixed deployment. The stopped delivery is not resent automatically.",
     };
   }
 
@@ -240,7 +284,7 @@ function journeyView(
         tone: "terminal",
         label: "STOPPED · CORRECTLY CLASSIFIED",
         headline: "HTTP 400 stopped after one request.",
-        explanation: "The destination rejected the data itself. Retrying the unchanged request would be wasteful, so EventHarbor stopped immediately.",
+        explanation: "Receiver Lab requires data.customer_id, but this event intentionally omits it. The same body would fail again, so EventHarbor classified the HTTP 400 as permanent and did not retry.",
       };
     }
     return {
@@ -248,7 +292,7 @@ function journeyView(
       tone: "danger",
       label: "DEAD LETTER · STOPPED",
       headline: `Stopped after ${originalDelivery.attempt_count} failed requests. Nothing was lost.`,
-      explanation: `The retry budget is exhausted. No automatic request ${maxAttempts + 1} will occur; recovery requires a separate repair and replay.`,
+      explanation: `The retry budget is exhausted. No automatic request ${maxAttempts + 1} will occur. Next, switch only the test receiver from HTTP 503 to HTTP 200, then create a separate replay.`,
     };
   }
 
@@ -302,10 +346,11 @@ function nodeState(
   event: EventDetail | null,
   delivered: boolean,
 ): "pending" | "complete" | "active" {
-  if (location === node || (location === "network" && (node === "worker" || node === "receiver"))) return "active";
+  if (location === node) return "active";
   if (!event) return node === "browser" && location !== "browser" ? "complete" : "pending";
   const order: Array<Exclude<JourneyLocation, "network">> = ["browser", "api", "postgres", "worker", "receiver"];
-  const activeIndex = location === "network" ? 3 : order.indexOf(location);
+  if (location === "network") return order.indexOf(node) <= order.indexOf("worker") ? "complete" : "pending";
+  const activeIndex = order.indexOf(location);
   const nodeIndex = order.indexOf(node);
   if (delivered || nodeIndex < activeIndex) return "complete";
   return "pending";
@@ -389,6 +434,7 @@ export function EventJourney({
   const exchangeResponse = latestExchange?.observation?.response_status_code
     ?? latestExchange?.attempt.http_status_code
     ?? null;
+  const latestResponseDetail = latestExchange ? responseBodyDetail(latestExchange.attempt) : null;
   const currentResponse = latestObservation?.response_status_code
     ?? latestExchange?.attempt.http_status_code
     ?? null;
@@ -457,17 +503,17 @@ export function EventJourney({
       node: "api",
       index: "02",
       label: "EventHarbor API",
-      address: "Public route · /api/v1/events",
+      address: "Browser route · /api/v1/events",
       status: event ? "HTTP 202 · ACCEPTED" : "WAITING",
-      hop: "SQL transaction",
+      hop: "SAVE EVENT + DELIVERY",
     },
     {
       node: "postgres",
       index: "03",
       label: "PostgreSQL",
-      address: "Docker network · postgres:5432",
+      address: "Docker service · postgres:5432",
       status: event ? "EVENT STORED · SAFE" : "WAITING",
-      hop: "Worker claims stored work",
+      hop: "WORKER PICKS UP JOB",
     },
     {
       node: "worker",
@@ -475,13 +521,13 @@ export function EventJourney({
       label: "Delivery worker",
       address: "Background process · no public port",
       status: workerStatus,
-      hop: "POST /webhooks",
+      hop: "POST WEBHOOK",
     },
     {
       node: "receiver",
       index: "05",
       label: endpointName,
-      address: `Docker network · ${endpointUrl}`,
+      address: `Worker target · ${endpointUrl}`,
       status: receiverNodeStatus,
       hop: null,
     },
@@ -506,25 +552,33 @@ export function EventJourney({
       </header>
 
       <ol className="journey-route" data-location={view.location} aria-label="Live event location">
-        {routeNodes.map(({ node, index, label, address, status, hop }) => (
-          <li
-            className="journey-route-node"
-            data-state={nodeState(node, view.location, event, delivered)}
-            key={node}
-            aria-current={nodeState(node, view.location, event, delivered) === "active" ? "step" : undefined}
-          >
-            <span className="journey-route-index">{index}</span>
-            <strong>{label}</strong>
-            <code className="journey-route-address">{address}</code>
-            <small>{status}</small>
-            {hop ? (
-              <>
-                <span className="journey-hop-label">{hop}</span>
-                <i className="journey-connector" aria-hidden="true"><b /></i>
-              </>
-            ) : null}
-          </li>
-        ))}
+        {routeNodes.map(({ node, index, label, address, status, hop }) => {
+          const state = nodeState(node, view.location, event, delivered);
+          return (
+            <Fragment key={node}>
+              <li
+                className="journey-route-node"
+                data-state={state}
+                aria-current={state === "active" ? "step" : undefined}
+              >
+                <span className="journey-route-index">{index}</span>
+                <strong>{label}</strong>
+                <code className="journey-route-address">{address}</code>
+                <small>{status}</small>
+              </li>
+              {hop ? (
+                <li
+                  className="journey-route-hop"
+                  data-active={view.location === "network" && node === "worker"}
+                  aria-hidden="true"
+                >
+                  <span>{hop}</span>
+                  <i className="journey-connector"><b /></i>
+                </li>
+              ) : null}
+            </Fragment>
+          );
+        })}
       </ol>
 
       <div className="journey-story-grid">
@@ -540,9 +594,9 @@ export function EventJourney({
           {scenario.strategy === "replay" && (originalDelivery?.status === "dead_lettered" || repairOccurred || replayOccurred) ? (
             <div className="journey-recovery-boundary" data-complete={Boolean(replayDelivery)}>
               <strong>Why there are two delivery rows</strong>
-              <span>{repairOccurred ? `${actor} changed Receiver Lab: HTTP 503 → HTTP 200` : "Waiting for receiver repair"}</span>
+              <span>{repairOccurred ? `${actor} changed only this test run: HTTP 503 → HTTP 200` : "Waiting for the test receiver to switch to HTTP 200"}</span>
               <span>{replayOccurred ? "Separate replay created" : "Replay not created yet"}</span>
-              <small>The original delivery stopped and stays preserved. Repair does not restart it; the recovery replay is separate and begins at request 1.</small>
+              <small>The original delivery stays stopped and preserved. Changing Receiver Lab does not resend anything; the recovery replay is separate and begins at request 1.</small>
             </div>
           ) : null}
           {replayDelivery || replayOccurred ? (
@@ -571,6 +625,7 @@ export function EventJourney({
                 <span>{latestExchange.attempt.status === "in_progress" ? "Request state" : "Receiver response"}</span>
                 <strong>{exchangeResponse ? `HTTP ${exchangeResponse}` : attemptOutcome(latestExchange.attempt)}</strong>
                 <p>{exchangeResponse ? responseName(exchangeResponse) : "Waiting for a network result"}</p>
+                {latestResponseDetail ? <em>{latestResponseDetail}</em> : null}
                 <small>{latestExchange.attempt.duration_ms === null ? "Duration pending" : `${latestExchange.attempt.duration_ms} ms`}</small>
               </div>
               <div className="journey-corroboration" data-matched={Boolean(latestExchange.observation)}>
@@ -631,16 +686,19 @@ export function EventJourney({
           <summary><span>View every HTTP attempt</span><b>+</b></summary>
           {exchanges.length ? (
             <div className="journey-attempt-table" role="table" aria-label="All actual HTTP attempts">
-              <div role="row"><strong role="columnheader">Delivery</strong><strong role="columnheader">Request</strong><strong role="columnheader">Result</strong><strong role="columnheader">Duration</strong><strong role="columnheader">Receiver evidence</strong></div>
-              {exchanges.map((exchange) => (
-                <div role="row" key={exchange.attempt.id}>
-                  <span role="cell">{exchange.generation === 0 ? "Original" : "Replay"}</span>
-                  <span role="cell">#{exchange.attempt.attempt_number}</span>
-                  <strong role="cell">{attemptOutcome(exchange.attempt)}</strong>
-                  <span role="cell">{exchange.attempt.duration_ms === null ? "Pending" : `${exchange.attempt.duration_ms} ms`}</span>
-                  <span role="cell">{exchange.observation ? `Receipt #${exchange.observation.sequence}` : "Awaiting"}</span>
-                </div>
-              ))}
+              <div role="row"><strong role="columnheader">Delivery</strong><strong role="columnheader">Request</strong><strong role="columnheader">Result</strong><strong role="columnheader">What EventHarbor did</strong><strong role="columnheader">Receiver evidence</strong></div>
+              {exchanges.map((exchange) => {
+                const decision = attemptDecision(exchange);
+                return (
+                  <div role="row" key={exchange.attempt.id}>
+                    <span role="cell">{exchange.generation === 0 ? "Original" : "Replay"}</span>
+                    <span role="cell">#{exchange.attempt.attempt_number}</span>
+                    <span className="journey-attempt-result" role="cell"><strong>{attemptOutcome(exchange.attempt)}</strong><small>{exchange.attempt.duration_ms === null ? "Duration pending" : `${exchange.attempt.duration_ms} ms`}</small></span>
+                    <span className="journey-attempt-decision" role="cell"><strong>{decision.label}</strong><small>{decision.detail}</small></span>
+                    <span role="cell">{exchange.observation ? `Receipt #${exchange.observation.sequence}` : "Awaiting"}</span>
+                  </div>
+                );
+              })}
             </div>
           ) : <p className="journey-detail-empty">No outbound request has been reserved yet.</p>}
         </details>

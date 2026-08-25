@@ -540,9 +540,9 @@ export function ControlRoomExperience() {
         >
           <div className="composer-topline">
             <span className="section-index">1 / Choose how the receiver behaves</span>
-            <div className="demo-mode-control demo-mode-control--compact" aria-label="Demo control mode">
-              <button type="button" disabled={formLocked} aria-pressed={mode === "guided"} onClick={() => setMode("guided")}>Guided</button>
-              <button type="button" disabled={formLocked} aria-pressed={mode === "operator"} onClick={() => setMode("operator")}>Manual</button>
+            <div className="demo-mode-control demo-mode-control--compact" role="group" aria-label="Demo mode">
+              <button type="button" disabled={formLocked} aria-label="Guided run: automatically demonstrate failure and recovery" aria-pressed={mode === "guided"} onClick={() => setMode("guided")}>Guided</button>
+              <button type="button" disabled={formLocked} aria-label="Manual controls: you trigger receiver restoration and replay" aria-pressed={mode === "operator"} onClick={() => setMode("operator")}>Manual</button>
             </div>
           </div>
           <h2 id="event-composer-title">Choose the failure. Then send the order.</h2>
@@ -581,6 +581,7 @@ export function ControlRoomExperience() {
           <div className="receiver-contract">
             <span>What will happen in Receiver Lab</span>
             <strong>{draftScenario.contract}</strong>
+            <p><b>Concrete cause</b>{draftScenario.cause}</p>
             <small>{draftScenario.takeaway}</small>
           </div>
           <button className="story-action" type="submit" disabled={formLocked || !eventDraftValid}>
@@ -635,8 +636,26 @@ export function ControlRoomExperience() {
             ) : (
               <>
                 {runOperatorStory.isPending || (storyEventId && !storyDeadLettered && !storyComplete) ? <button className="story-action" type="button" disabled><span>Following live system state…</span><span aria-hidden="true">●</span></button> : null}
-                {storyDeadLettered && activeScenario.strategy === "replay" && !receiverReady ? <button className="story-action story-action-repair" type="button" disabled={repairReceiver.isPending} onClick={() => repairReceiver.mutate()}><span>{repairReceiver.isPending ? "Repairing this receiver…" : "Repair this receiver"}</span><span aria-hidden="true">→</span></button> : null}
-                {storyDeadLettered && activeScenario.strategy === "replay" && receiverReady && sourceDelivery && !replayGeneration ? <button className="story-action" type="button" onClick={() => setReplayOpen(true)}><span>Review and create a separate replay</span><span aria-hidden="true">→</span></button> : null}
+                {storyDeadLettered && activeScenario.strategy === "replay" && !receiverReady ? (
+                  <>
+                    <div className="recovery-action-explainer">
+                      <span>What this control changes</span>
+                      <strong>Only this Receiver Lab run: HTTP 503 → HTTP 200</strong>
+                      <p>This is controlled fault injection, like the destination recovering after a restart or fixed deployment. It does not change EventHarbor, erase the failures, or resend the webhook.</p>
+                    </div>
+                    <button className="story-action story-action-repair" type="button" disabled={repairReceiver.isPending} onClick={() => repairReceiver.mutate()}><span>{repairReceiver.isPending ? "Changing the next response to HTTP 200…" : "Switch this test receiver to HTTP 200"}</span><span aria-hidden="true">→</span></button>
+                  </>
+                ) : null}
+                {storyDeadLettered && activeScenario.strategy === "replay" && receiverReady && sourceDelivery && !replayGeneration ? (
+                  <>
+                    <div className="recovery-action-explainer" data-restored="true">
+                      <span>Test receiver restored</span>
+                      <strong>Receiver Lab now returns HTTP 200 for this run.</strong>
+                      <p>The original delivery is still stopped and preserved. Nothing is resent until you create the separate replay below.</p>
+                    </div>
+                    <button className="story-action" type="button" onClick={() => setReplayOpen(true)}><span>Review and create a separate replay</span><span aria-hidden="true">→</span></button>
+                  </>
+                ) : null}
                 {storyComplete ? <button className="story-action story-action-complete" type="button" onClick={prepareAnother}><span>Set up another failure scenario</span><span aria-hidden="true">↗</span></button> : null}
               </>
             )}

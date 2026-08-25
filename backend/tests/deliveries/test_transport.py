@@ -170,7 +170,13 @@ async def test_non_finite_retry_after_is_ignored() -> None:
 @pytest.mark.asyncio
 async def test_permanent_client_failure_is_terminal() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, content=b"invalid")
+        return httpx.Response(
+            400,
+            json={
+                "code": "missing_customer_id",
+                "detail": "data.customer_id is required.",
+            },
+        )
 
     now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -184,7 +190,9 @@ async def test_permanent_client_failure_is_terminal() -> None:
 
     assert result.disposition == DeliveryDisposition.TERMINAL_FAILURE
     assert result.http_status_code == 400
-    assert result.response_body_excerpt == "invalid"
+    assert result.response_body_excerpt == (
+        '{"code":"missing_customer_id","detail":"data.customer_id is required."}'
+    )
 
 
 @pytest.mark.asyncio
