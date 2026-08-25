@@ -67,7 +67,7 @@ function observation(sequence: number, deliveryId: string, request: number, stat
     attempt: request,
     event_id: eventId,
     delivery_id: deliveryId,
-    event_type: "demo.order.paid",
+    event_type: "order.paid",
     delivery_attempt: request,
     request_timestamp: 1_777_070_400 + request,
     received_at: now,
@@ -87,13 +87,14 @@ describe("ControlRoomExperience", () => {
   const completedEvent: EventDetail = {
     id: eventId,
     source: "local-api",
-    type: "demo.order.paid",
+    type: "order.paid",
     data: {
       run_id: runId,
       scenario: "outage_replay",
       order_id: "ORDER-PRESERVED",
+      customer_id: "CUS-PRESERVED",
       amount_cents: 12_900,
-      note: "Ready",
+      currency: "USD",
     },
     payload_sha256: hash,
     request_fingerprint_sha256: "b".repeat(64),
@@ -103,6 +104,7 @@ describe("ControlRoomExperience", () => {
   };
 
   beforeEach(() => {
+    vi.clearAllMocks();
     window.HTMLElement.prototype.scrollIntoView = vi.fn();
     sessionStorage.clear();
     sessionStorage.setItem("eventharbor.control-room.event-id", eventId);
@@ -111,15 +113,23 @@ describe("ControlRoomExperience", () => {
       runId,
       eventId,
       replayDeliveryId: replay.id,
-      payload: { order_id: "ORDER-PRESERVED", amount_cents: 12_900, note: "Ready" },
+      payload: {
+        type: "order.paid",
+        data: {
+          order_id: "ORDER-PRESERVED",
+          customer_id: "CUS-PRESERVED",
+          amount_cents: 12_900,
+          currency: "USD",
+        },
+      },
       scenarioId: "outage_replay",
     }));
 
     vi.mocked(api.getEvent).mockResolvedValue(completedEvent);
     vi.mocked(api.getEndpoint).mockResolvedValue({
       id: "endpoint-1",
-      name: "Receiver Lab",
-      url: "http://receiver-lab:8100/webhooks",
+      name: "Orders receiver · Receiver Lab",
+      url: "http://receiver-lab:8100/webhooks/orders",
       enabled: true,
       secret_version: 1,
       created_at: now,
@@ -150,7 +160,7 @@ describe("ControlRoomExperience", () => {
       </QueryClientProvider>,
     );
 
-    expect(screen.getByRole("heading", { name: /choose the failure. then send the order/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /choose the failure. then send the event/i })).toBeVisible();
     expect(await screen.findByRole("heading", { name: /recovery replay reached receiver lab/i })).toBeVisible();
     expect(screen.getByRole("heading", { name: "ORDER-PRESERVED" })).toBeVisible();
 
@@ -160,14 +170,32 @@ describe("ControlRoomExperience", () => {
     expect(screen.getByRole("heading", { name: /recovery replay reached receiver lab/i })).toBeVisible();
     expect(screen.getByText(/completed story preserved below/i)).toBeVisible();
     expect(screen.getByRole("button", { name: /receiver recovers briefly/i })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByLabelText("Order ID")).not.toHaveValue("ORDER-PRESERVED");
+    expect(screen.getByLabelText(/Order ID/i)).not.toHaveValue("ORDER-PRESERVED");
     expect(sessionStorage.getItem("eventharbor.control-room.event-id")).toBe(eventId);
     expect(sessionStorage.getItem("eventharbor.control-room.tour")).toContain(eventId);
 
     fireEvent.click(screen.getByRole("button", { name: /receiver rejects invalid data/i }));
-    expect(screen.getByText(/data.customer_id is missing/i)).toBeVisible();
-    expect(screen.getByText(/intentionally has no data.customer_id/i)).toBeVisible();
-    expect(screen.getByText(/original delivery stays stopped and preserved/i)).toBeVisible();
+    expect(screen.getAllByText("data.customer_id").length).toBeGreaterThan(0);
+    expect(screen.getByText(/intentionally omitted from the JSON body/i)).toBeVisible();
+    expect(screen.getByText(/original evidence remains unchanged/i)).toBeVisible();
     await waitFor(() => expect(api.getEvent).toHaveBeenCalledWith(eventId));
+  });
+
+  it("opens a correction link as a fresh valid draft instead of restoring the stopped event", () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={["/?event_type=shipment.dispatched&new_event=1"]}>
+          <ControlRoomExperience />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByRole("combobox", { name: /business event type/i })).toHaveValue("shipment.dispatched");
+    expect(screen.getByLabelText(/Tracking number/i)).not.toHaveValue("");
+    expect(screen.queryByRole("heading", { name: "ORDER-PRESERVED" })).not.toBeInTheDocument();
+    expect(api.getEvent).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem("eventharbor.control-room.event-id")).toBeNull();
+    expect(sessionStorage.getItem("eventharbor.control-room.tour")).toBeNull();
   });
 });

@@ -37,19 +37,19 @@ export function ReplayConfirmation({
         }}
       >
         <p className="eyebrow">Controlled recovery</p>
-        <h2 id="replay-title">Create a separate recovery replay?</h2>
+        <h2 id="replay-title">Replay the preserved event?</h2>
         <p id="replay-description">
-          EventHarbor will preserve the original failed delivery and every HTTP attempt, then create a new replay
-          from delivery {shortId(deliveryId)}. The replay starts again at request 1.
+          EventHarbor already performed the automatic retries. It will preserve the original delivery and every
+          failed HTTP attempt, then create one traceable recovery delivery from {shortId(deliveryId)}.
         </p>
         <div className="confirmation-warning">
           <strong>This sends the webhook again.</strong>
-          <span>The receiver is configured to succeed.</span>
+          <span>Approval is required because silently resending after the retry limit could duplicate a receiver side effect.</span>
         </div>
         <div className="confirmation-actions">
           <button ref={cancelRef} className="secondary-button" type="button" disabled={busy} onClick={onCancel}>Cancel</button>
           <button className="primary-button" type="button" disabled={busy} onClick={onConfirm}>
-            {busy ? "Accepting replay…" : "Approve replay →"}
+            {busy ? "Creating replay…" : "Approve and replay →"}
           </button>
         </div>
       </section>

@@ -1,6 +1,8 @@
 import type {
   DemoScenarioId,
   DemoEventPayload,
+  DemoEventTypeId,
+  DeliveryAttemptsResponse,
   Endpoint,
   EventAccepted,
   EventDetail,
@@ -9,6 +11,7 @@ import type {
   ReplayAccepted,
 } from "./types";
 import { DEFAULT_DEMO_SCENARIO_ID, demoScenario, isDemoScenarioId } from "./demoScenarios";
+import { demoEventDefinition, isExpectedSchemaRejection } from "./demoEvents";
 
 export type ReliabilityTourPhase =
   | "idle"
@@ -46,7 +49,7 @@ export interface ReliabilityTourResult extends ReliabilityTourProgress {
 export interface ReliabilityTourDependencies {
   getReceiverLab: (runId?: string) => Promise<ReceiverLabState>;
   setReceiverLabPreset: (preset: ReceiverLabPreset, runId?: string) => Promise<ReceiverLabState>;
-  ensureReceiverLabEndpoint: () => Promise<Endpoint>;
+  ensureReceiverLabEndpoint: (eventType?: DemoEventTypeId) => Promise<Endpoint>;
   publishDemoEvent: (
     endpointId: string,
     runId: string,
@@ -55,6 +58,7 @@ export interface ReliabilityTourDependencies {
     scenarioId?: DemoScenarioId,
   ) => Promise<EventAccepted>;
   getEvent: (eventId: string) => Promise<EventDetail>;
+  getDeliveryAttempts: (deliveryId: string) => Promise<DeliveryAttemptsResponse>;
   replayDelivery: (
     deliveryId: string,
     idempotencyKey: string,
@@ -143,7 +147,9 @@ export async function runReliabilityTour(
   let event: EventDetail | null = null;
   let currentMessage = "Ready to run the reliability tour.";
   // Snapshot editable input once so callers cannot change a running or resumable tour.
-  const payload = options.payload ? { ...options.payload } : undefined;
+  const payload = options.payload
+    ? { type: options.payload.type, data: { ...options.payload.data } }
+    : undefined;
 
   const progress = (): ReliabilityTourProgress => ({
     phase,
@@ -237,7 +243,7 @@ export async function runReliabilityTour(
         throw new TourPause(`Receiver Lab did not enter the ${selectedScenario.preset} preset.`);
       }
 
-      const endpoint = await dependencies.ensureReceiverLabEndpoint();
+      const endpoint = await dependencies.ensureReceiverLabEndpoint(payload?.type);
       endpointId = endpoint.id;
       const accepted = payload
         ? await dependencies.publishDemoEvent(
@@ -312,9 +318,17 @@ export async function runReliabilityTour(
       }
 
       if (selectedScenario.strategy === "terminal" && source.status === "dead_lettered") {
+        const invalidField = demoEventDefinition(event.type).invalidField;
+        const attemptEvidence = await dependencies.getDeliveryAttempts(source.id);
+        if (!isExpectedSchemaRejection(event.type, source, attemptEvidence.attempts)) {
+          return fail(
+            `The delivery stopped, but its persisted attempt did not prove the expected missing_${invalidField} HTTP 400 response.`,
+            event,
+          );
+        }
         report(
           "verified",
-          "Receiver Lab returned HTTP 400 because data.customer_id is missing. EventHarbor classified the unchanged request as non-retryable and stopped after one attempt.",
+          `Receiver Lab returned HTTP 400 because data.${invalidField} is missing. EventHarbor classified the unchanged request as non-retryable, stopped after one attempt, and kept the evidence.`,
           event,
         );
         return result();
@@ -365,14 +379,14 @@ export async function runReliabilityTour(
       );
       await pauseForPresentation();
 
-      report("repairing", "Changing only this Receiver Lab run from HTTP 503 to HTTP 200, simulating a destination that recovered after a restart or fixed deployment.", event);
       const receiver = await dependencies.getReceiverLab(runId);
       if (receiver.preset !== "success") {
-        const repaired = await dependencies.setReceiverLabPreset("success", runId);
-        if (repaired.preset !== "success") {
+        const restored = await dependencies.setReceiverLabPreset("success", runId);
+        if (restored.preset !== "success") {
           throw new TourPause("Receiver Lab did not enter the success preset.");
         }
       }
+      report("repairing", "Receiver Lab confirmed that this isolated test receiver is healthy and will now return HTTP 200. EventHarbor's stored failure evidence remains unchanged.", event);
       await pauseForPresentation();
 
       report("replaying", "Creating a separate, traceable recovery replay that starts at request 1.", event);
@@ -392,14 +406,14 @@ export async function runReliabilityTour(
         return fail("The recovery replay is not linked to the original delivery.", event);
       }
       if (currentReplay.status !== "delivered" && currentReplay.status !== "dead_lettered") {
-        report("repairing", "Confirming that this Receiver Lab run now returns HTTP 200 before the separate replay continues.", event);
         const receiver = await dependencies.getReceiverLab(runId);
         if (receiver.preset !== "success") {
-          const repaired = await dependencies.setReceiverLabPreset("success", runId);
-          if (repaired.preset !== "success") {
+          const restored = await dependencies.setReceiverLabPreset("success", runId);
+          if (restored.preset !== "success") {
             throw new TourPause("Receiver Lab did not enter the success preset.");
           }
         }
+        report("repairing", "Receiver Lab confirmed healthy and ready to return HTTP 200 before the separate replay continues.", event);
       }
     }
 
@@ -427,7 +441,7 @@ export async function runReliabilityTour(
 
       report(
         "replaying",
-        "The repaired receiver is handling the separate recovery replay.",
+        "The receiver is healthy and handling the separate recovery replay.",
         event,
       );
       event = await readEventAfterPoll();

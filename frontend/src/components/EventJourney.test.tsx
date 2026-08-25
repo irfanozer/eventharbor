@@ -61,13 +61,14 @@ function event(...deliveries: Delivery[]): EventDetail {
   return {
     id: "event-7f2a",
     source: "local-api",
-    type: "demo.order.paid",
+    type: "order.paid",
     data: {
       run_id: "run-7f2a",
       scenario: "outage_replay",
       order_id: "ORDER-7F2A",
+      customer_id: "CUS-7F2A",
       amount_cents: 12_900,
-      note: "Ready",
+      currency: "USD",
     },
     payload_sha256: hash,
     request_fingerprint_sha256: "b".repeat(64),
@@ -88,7 +89,7 @@ function observation(
     attempt: attemptNumber,
     event_id: "event-7f2a",
     delivery_id: deliveryId,
-    event_type: "demo.order.paid",
+    event_type: "order.paid",
     delivery_attempt: attemptNumber,
     request_timestamp: 1_777_070_400 + attemptNumber,
     received_at: now,
@@ -107,8 +108,8 @@ function commonProps() {
     tourMessage: "Observed from durable state.",
     isStarting: false,
     runId: "run-7f2a",
-    endpointName: "Receiver Lab",
-    endpointUrl: "http://receiver-lab:8100/webhooks",
+    endpointName: "Orders receiver · Receiver Lab",
+    endpointUrl: "http://receiver-lab:8100/webhooks/orders",
     receiverControlStatus: "ready" as const,
     maxAttempts: 4,
   };
@@ -140,10 +141,11 @@ describe("EventJourney", () => {
 
     expect(screen.getByRole("heading", { name: /recovery replay reached receiver lab/i })).toBeVisible();
     expect(screen.getByText(/replay request 1 received HTTP 200/i)).toBeVisible();
-    expect(screen.getByText(/original delivery stays stopped and preserved/i)).toBeVisible();
+    expect(screen.getByText(/original evidence remains unchanged/i)).toBeVisible();
+    expect(screen.getByText(/dead-lettered.*does not mean deleted/i)).toBeVisible();
     const originalHistory = screen.getByLabelText("Original delivery actual request history");
     expect(within(originalHistory).getAllByText("HTTP 503")).toHaveLength(4);
-    expect(screen.getByText("POST /api/v1/events")).toBeVisible();
+    expect(screen.getByText(/HTTP INTAKE · POST \/api\/v1\/events/i)).toBeVisible();
     expect(screen.getByText("Docker service · postgres:5432")).toBeVisible();
     expect(screen.queryByText(/generation 0|generation 1|\bG0\b|\bG1\b/i)).not.toBeInTheDocument();
     expect(screen.getByText("✓ Exact byte match")).toBeVisible();
@@ -198,11 +200,40 @@ describe("EventJourney", () => {
       />,
     );
 
-    expect(screen.getByRole("heading", { name: /HTTP 400 stopped after one request/i })).toBeVisible();
-    expect(screen.getByText(/intentionally omits it/i)).toBeVisible();
+    expect(screen.getByRole("heading", { name: /HTTP 400: data.customer_id was missing/i })).toBeVisible();
+    expect(screen.getByText(/contract requires data.customer_id/i)).toBeVisible();
     expect(screen.getAllByText("data.customer_id is required.")[0]).toBeVisible();
     expect(screen.getByText("Stopped · not retryable")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /correctly stopped. no useless retries/i })).toBeVisible();
+    expect(screen.getByText(/unchanged replay is blocked/i)).toBeVisible();
     expect(screen.queryByText(/new replay/i)).not.toBeInTheDocument();
+  });
+
+  it("asks for evidence review instead of mislabeling an unrelated HTTP 400", () => {
+    const original = delivery("delivery-0", 0, "dead_lettered", 1);
+    render(
+      <EventJourney
+        {...commonProps()}
+        scenario={demoScenario("permanent_rejection")}
+        event={event(original)}
+        originalDelivery={original}
+        replayDelivery={null}
+        originalAttempts={[attempt(
+          "g0-1",
+          1,
+          400,
+          "terminal_failure",
+          '{"code":"invalid_signature","detail":"signature mismatch"}',
+        )]}
+        replayAttempts={[]}
+        receiverObservations={[observation(1, original.id, 1, 400)]}
+        repairOccurred={false}
+        replayOccurred={false}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: /not with the expected schema proof/i })).toBeVisible();
+    expect(screen.getByText(/Open every HTTP attempt/i)).toBeVisible();
+    expect(screen.queryByText(/data.customer_id was missing/i)).not.toBeInTheDocument();
   });
 });

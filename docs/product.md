@@ -35,15 +35,16 @@ Their questions are operational:
 3. Publish an event with an idempotency key.
 4. Receive a stable event ID after the database transaction commits.
 5. Watch every delivery attempt and retry in the timeline.
-6. Inspect a dead letter, repair its destination, and approve replay.
+6. Inspect a stopped, saved delivery, confirm its destination is online, and approve replay.
 
 ## Public demonstration
 
 The demo opens directly to a guided Control Room without a registration wall.
 Visitors publish synthetic events only to the built-in Receiver Lab. The
-lab can return `200`, fail a deterministic number of times with `503`, return
-`429` with `Retry-After`, exceed the request timeout, or return a permanent
-`400`.
+lab exposes named order, shipping, and inventory routes. It can return `200`,
+fail a deterministic number of times with `503`, return `429` with
+`Retry-After`, exceed the request timeout, or validate the selected event
+contract and return an exact permanent `400`.
 
 Arbitrary outbound URLs remain disabled in the public demo to prevent SSRF and
 open-relay abuse.

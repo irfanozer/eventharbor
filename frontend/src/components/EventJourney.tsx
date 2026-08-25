@@ -1,6 +1,7 @@
 import { Fragment, type ReactNode } from "react";
 
 import type { DemoScenario } from "../demoScenarios";
+import { demoEventDefinition, isExpectedSchemaRejection } from "../demoEvents";
 import type { ReliabilityTourPhase } from "../reliabilityTour";
 import type {
   Delivery,
@@ -99,6 +100,14 @@ function responseName(status: number): string {
   if (status === 429) return "Rate Limited";
   if (status === 503) return "Service Unavailable";
   return status >= 200 && status < 300 ? "Successful" : "HTTP response";
+}
+
+function routePath(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return "/webhooks";
+  }
 }
 
 function attemptOutcome(attempt: DeliveryAttempt): string {
@@ -215,6 +224,7 @@ function journeyView(
   latestExchange: Exchange | undefined,
   repairOccurred: boolean,
   maxAttempts: number,
+  schemaRejectionVerified: boolean,
 ): JourneyView {
   if (!event) {
     if (isStarting || tourPhase === "preparing") {
@@ -222,7 +232,7 @@ function journeyView(
         location: "api",
         tone: "active",
         label: "API · ACCEPTING",
-        headline: "The browser is publishing your order event.",
+        headline: "The browser is publishing your business event.",
         explanation: "EventHarbor is preparing the isolated receiver behavior and accepting POST /api/v1/events.",
       };
     }
@@ -230,7 +240,7 @@ function journeyView(
       location: "browser",
       tone: "idle",
       label: "READY · BROWSER",
-      headline: "Ready to send one real order event.",
+      headline: "Ready to send one real business event.",
       explanation: "Choose an incident above. Every status below will come from an API, database row, worker attempt, or receiver receipt.",
     };
   }
@@ -249,9 +259,9 @@ function journeyView(
     return {
       location: "receiver",
       tone: "active",
-      label: "RECEIVER LAB · CHANGING RESPONSE",
-      headline: "Receiver Lab will accept the next webhook.",
-      explanation: "This isolated test run now returns HTTP 200 instead of HTTP 503, simulating a destination coming back after a restart or fixed deployment. The stopped delivery is not resent automatically.",
+      label: "RECEIVER LAB · HEALTHY",
+      headline: "The test receiver is accepting requests again.",
+      explanation: "The receiver control response confirmed HTTP 200 mode instead of HTTP 503. The original event remains stopped and saved until a separate, traceable replay is created.",
     };
   }
 
@@ -273,26 +283,36 @@ function journeyView(
       headline: scenario.id === "rate_limit_recovery"
         ? "Delivered after respecting the receiver's rate limit."
         : "Delivered after the destination recovered.",
-      explanation: `The original delivery completed in ${currentDelivery.attempt_count} real HTTP requests. No manual repair or replay was needed.`,
+      explanation: `The original delivery completed in ${currentDelivery.attempt_count} real HTTP requests. No manual intervention or replay was needed.`,
     };
   }
 
   if (originalDelivery?.status === "dead_lettered") {
     if (scenario.strategy === "terminal") {
+      const invalidField = demoEventDefinition(event.type).invalidField;
+      if (!schemaRejectionVerified) {
+        return {
+          location: "worker",
+          tone: "danger",
+          label: "STOPPED · EVIDENCE NEEDS REVIEW",
+          headline: "The delivery stopped, but not with the expected schema proof.",
+          explanation: `The demo expected one terminal HTTP 400 with response code missing_${invalidField}. Open every HTTP attempt to inspect the actual persisted result.`,
+        };
+      }
       return {
         location: "worker",
         tone: "terminal",
-        label: "STOPPED · CORRECTLY CLASSIFIED",
-        headline: "HTTP 400 stopped after one request.",
-        explanation: "Receiver Lab requires data.customer_id, but this event intentionally omits it. The same body would fail again, so EventHarbor classified the HTTP 400 as permanent and did not retry.",
+        label: "STOPPED AND SAVED · CORRECTLY CLASSIFIED",
+        headline: `HTTP 400: data.${invalidField} was missing.`,
+        explanation: `Receiver Lab is online, but its ${event.type} contract requires data.${invalidField}. The unchanged body would fail again, so EventHarbor saved the evidence and correctly made no pointless retry.`,
       };
     }
     return {
       location: "worker",
       tone: "danger",
-      label: "DEAD LETTER · STOPPED",
-      headline: `Stopped after ${originalDelivery.attempt_count} failed requests. Nothing was lost.`,
-      explanation: `The retry budget is exhausted. No automatic request ${maxAttempts + 1} will occur. Next, switch only the test receiver from HTTP 503 to HTTP 200, then create a separate replay.`,
+      label: "AUTOMATIC DELIVERY STOPPED · EVENT SAVED",
+      headline: `Retry limit reached after ${originalDelivery.attempt_count} failed requests.`,
+      explanation: `No automatic request ${maxAttempts + 1} will occur. EventHarbor calls this dead-lettered: sending has stopped, but the event and every failure remain stored for a safe, approved replay.`,
     };
   }
 
@@ -358,7 +378,7 @@ function nodeState(
 
 function historyStatus(delivery: Delivery | null): string {
   if (!delivery) return "NOT CREATED";
-  if (delivery.status === "dead_lettered") return "STOPPED";
+  if (delivery.status === "dead_lettered") return "STOPPED · SAVED";
   return delivery.status.replaceAll("_", " ").toUpperCase();
 }
 
@@ -440,8 +460,13 @@ export function EventJourney({
     ?? null;
   const currentDelivery = replayDelivery ?? originalDelivery;
   const delivered = currentDelivery?.status === "delivered";
+  const schemaRejectionVerified = isExpectedSchemaRejection(
+    event?.type,
+    originalDelivery,
+    originalAttempts,
+  );
   const completed = delivered || (
-    scenario.strategy === "terminal" && originalDelivery?.status === "dead_lettered"
+    scenario.strategy === "terminal" && schemaRejectionVerified
   );
   const view = journeyView(
     scenario,
@@ -453,6 +478,7 @@ export function EventJourney({
     latestExchange,
     repairOccurred,
     maxAttempts,
+    schemaRejectionVerified,
   );
   const wirePayload = event ? {
     id: event.id,
@@ -476,7 +502,7 @@ export function EventJourney({
   const hashMatches = Boolean(event && proofObservation?.body_sha256 === event.payload_sha256);
   const activeGeneration = latestExchange?.generation ?? (replayDelivery ? 1 : 0);
   const workerStatus = currentDelivery?.status === "dead_lettered"
-    ? "STOPPED · NEEDS ACTION"
+    ? "STOPPED · EVENT SAVED"
     : latestExchange
       ? deliveryRequestName(activeGeneration, latestExchange.attempt.attempt_number).toUpperCase()
       : event
@@ -496,8 +522,8 @@ export function EventJourney({
       index: "01",
       label: "Browser UI",
       address: "This page",
-      status: event ? "ORDER SENT" : "READY TO SEND",
-      hop: "POST /api/v1/events",
+      status: event ? "EVENT SENT" : "READY TO SEND",
+      operation: "START · THIS BROWSER",
     },
     {
       node: "api",
@@ -505,7 +531,7 @@ export function EventJourney({
       label: "EventHarbor API",
       address: "Browser route · /api/v1/events",
       status: event ? "HTTP 202 · ACCEPTED" : "WAITING",
-      hop: "SAVE EVENT + DELIVERY",
+      operation: "HTTP INTAKE · POST /api/v1/events",
     },
     {
       node: "postgres",
@@ -513,7 +539,7 @@ export function EventJourney({
       label: "PostgreSQL",
       address: "Docker service · postgres:5432",
       status: event ? "EVENT STORED · SAFE" : "WAITING",
-      hop: "WORKER PICKS UP JOB",
+      operation: "ATOMIC STORE · SQL TRANSACTION",
     },
     {
       node: "worker",
@@ -521,7 +547,7 @@ export function EventJourney({
       label: "Delivery worker",
       address: "Background process · no public port",
       status: workerStatus,
-      hop: "POST WEBHOOK",
+      operation: "BACKGROUND CLAIM · STORED DELIVERY",
     },
     {
       node: "receiver",
@@ -529,9 +555,12 @@ export function EventJourney({
       label: endpointName,
       address: `Worker target · ${endpointUrl}`,
       status: receiverNodeStatus,
-      hop: null,
+      operation: `OUTBOUND WEBHOOK · POST ${routePath(endpointUrl)}`,
     },
   ] as const;
+  const currentRouteDescription = view.location === "network"
+    ? "Current location: outbound HTTP request from the delivery worker to the receiver."
+    : `Current location: ${routeNodes.find((route) => route.node === view.location)?.label ?? "EventHarbor"}.`;
 
   return (
     <section className="event-journey" id="live-proof" data-tone={view.tone} aria-labelledby="event-journey-title">
@@ -551,8 +580,9 @@ export function EventJourney({
         ) : null}
       </header>
 
-      <ol className="journey-route" data-location={view.location} aria-label="Live event location">
-        {routeNodes.map(({ node, index, label, address, status, hop }) => {
+      <p className="sr-only" id="journey-route-current">{currentRouteDescription}</p>
+      <ol className="journey-route" data-location={view.location} aria-label="Live event location" aria-describedby="journey-route-current">
+        {routeNodes.map(({ node, index, label, address, status, operation }, routeIndex) => {
           const state = nodeState(node, view.location, event, delivered);
           return (
             <Fragment key={node}>
@@ -561,18 +591,18 @@ export function EventJourney({
                 data-state={state}
                 aria-current={state === "active" ? "step" : undefined}
               >
-                <span className="journey-route-index">{index}</span>
+                <span className="journey-route-operation">{operation}</span>
+                <span className="journey-route-index" aria-hidden="true">{index}</span>
                 <strong>{label}</strong>
                 <code className="journey-route-address">{address}</code>
                 <small>{status}</small>
               </li>
-              {hop ? (
+              {routeIndex < routeNodes.length - 1 ? (
                 <li
                   className="journey-route-hop"
                   data-active={view.location === "network" && node === "worker"}
                   aria-hidden="true"
                 >
-                  <span>{hop}</span>
                   <i className="journey-connector"><b /></i>
                 </li>
               ) : null}
@@ -591,12 +621,24 @@ export function EventJourney({
             <span>Read from PostgreSQL attempt rows</span>
           </header>
           <AttemptHistory generation={0} delivery={originalDelivery} attempts={originalAttempts} />
+          {originalDelivery?.status === "dead_lettered" ? (
+            <aside className="journey-dead-letter-explainer">
+              <strong>Stopped and saved <span>(database status: dead_lettered)</span></strong>
+              <p>{scenario.strategy === "terminal"
+                ? "“Dead-lettered” does not mean deleted. EventHarbor preserved the event and its rejection evidence, but an unchanged replay is blocked; publish a new event with corrected data."
+                : "“Dead-lettered” does not mean deleted. EventHarbor ended automatic sending, preserved the event and every HTTP attempt, and now requires review before a recovery delivery is created."}</p>
+            </aside>
+          ) : null}
           {scenario.strategy === "replay" && (originalDelivery?.status === "dead_lettered" || repairOccurred || replayOccurred) ? (
             <div className="journey-recovery-boundary" data-complete={Boolean(replayDelivery)}>
               <strong>Why there are two delivery rows</strong>
-              <span>{repairOccurred ? `${actor} changed only this test run: HTTP 503 → HTTP 200` : "Waiting for the test receiver to switch to HTTP 200"}</span>
-              <span>{replayOccurred ? "Separate replay created" : "Replay not created yet"}</span>
-              <small>The original delivery stays stopped and preserved. Changing Receiver Lab does not resend anything; the recovery replay is separate and begins at request 1.</small>
+              <span>{repairOccurred ? `${actor} restored this test receiver: HTTP 503 → HTTP 200` : "Waiting for the test receiver to become healthy"}</span>
+              <span>{replayOccurred
+                ? demoMode === "guided" ? "Guided replay created" : "Approved replay created"
+                : demoMode === "guided" ? "Guided run will create one replay" : "Operator approval still required"}</span>
+              <small>{demoMode === "guided"
+                ? "EventHarbor already performed the automatic retries. The guided controller waits for the stopped state, confirms receiver health, and calls the same replay API an operator would use; the original evidence remains unchanged."
+                : "EventHarbor already performed the automatic retries. It will not guess whether a resend is safe; your approval creates a traceable recovery delivery while the original evidence remains unchanged."}</small>
             </div>
           ) : null}
           {replayDelivery || replayOccurred ? (

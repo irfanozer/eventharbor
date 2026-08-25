@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from eventharbor.deliveries.retry import DeliveryDisposition
+from eventharbor.deliveries.retry import DeliveryDisposition, ReplayBlockCode
 from eventharbor.deliveries.state_machine import DeliveryAttemptStatus, DeliveryStatus
 
 
@@ -197,6 +197,7 @@ class DeadLetterItemResponse(BaseModel):
     endpoint: EndpointPublicResponse
     delivery: DeliverySummaryResponse
     replayable: bool
+    blocked_code: ReplayBlockCode | None
     blocked_reason: str | None
 
 
@@ -296,6 +297,7 @@ class ReceiverLabRequestResponse(BaseModel):
     event_id: str | None
     delivery_id: str | None
     event_type: str | None
+    receiver_route: str = "legacy-generic"
     delivery_attempt: int | None = Field(ge=1)
     request_timestamp: int | None = Field(ge=0)
     received_at: datetime

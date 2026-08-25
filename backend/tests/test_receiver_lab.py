@@ -62,38 +62,24 @@ async def test_receiver_can_rate_limit_twice_then_recover() -> None:
 
 
 @pytest.mark.asyncio
-async def test_permanent_rejection_names_the_missing_field_and_accepts_corrected_data() -> None:
+async def test_legacy_order_contract_remains_replay_compatible() -> None:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         await client.put(
-            "/control?run_id=validation-demo",
-            json={"mode": "permanent_failure", "failures_before_success": 0, "delay_ms": 0},
+            "/control?run_id=legacy-order-demo",
+            json={"mode": "success", "failures_before_success": 0, "delay_ms": 0},
         )
 
-        rejected = await client.post(
+        response = await client.post(
             "/webhooks",
             json={"type": "demo.order.paid", "data": {"order_id": "ORDER-1"}},
-            headers={"X-EventHarbor-Demo-Run-Id": "validation-demo"},
+            headers={"X-EventHarbor-Demo-Run-Id": "legacy-order-demo"},
         )
-        accepted = await client.post(
-            "/webhooks",
-            json={
-                "type": "demo.order.paid",
-                "data": {"order_id": "ORDER-2", "customer_id": "CUS-42"},
-            },
-            headers={"X-EventHarbor-Demo-Run-Id": "validation-demo"},
-        )
-        evidence = (await client.get("/requests?run_id=validation-demo")).json()["requests"]
+        evidence = (await client.get("/requests?run_id=legacy-order-demo")).json()["requests"]
 
-    assert rejected.status_code == 400
-    assert rejected.json() == {
-        "code": "missing_customer_id",
-        "detail": "data.customer_id is required.",
-    }
-    assert accepted.status_code == 200
-    assert [item["response_status_code"] for item in evidence] == [400, 200]
-    assert "customer_id" not in evidence[0]["body_preview"]
-    assert "CUS-42" in evidence[1]["body_preview"]
+    assert response.status_code == 200
+    assert response.json()["code"] == "accepted"
+    assert evidence[0]["receiver_route"] == "legacy-generic"
 
 
 @pytest.mark.asyncio
@@ -110,6 +96,113 @@ async def test_permanent_rejection_reports_malformed_json_honestly() -> None:
     assert response.json() == {
         "code": "invalid_json",
         "detail": "The webhook body must be valid JSON.",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("route", "event_type", "data"),
+    [
+        (
+            "orders",
+            "order.paid",
+            {
+                "order_id": "ORDER-1",
+                "customer_id": "CUS-1",
+                "amount_cents": 12_900,
+                "currency": "USD",
+            },
+        ),
+        (
+            "shipping",
+            "shipment.dispatched",
+            {
+                "shipment_id": "SHIP-1",
+                "order_id": "ORDER-1",
+                "carrier": "DHL",
+                "tracking_number": "DHL-1-US",
+            },
+        ),
+        (
+            "inventory",
+            "inventory.threshold_reached",
+            {
+                "sku": "SKU-1",
+                "warehouse_id": "WH-NYC-01",
+                "quantity_remaining": 4,
+                "reorder_threshold": 10,
+            },
+        ),
+    ],
+)
+async def test_named_receiver_routes_accept_their_real_event_contract(
+    route: str,
+    event_type: str,
+    data: dict[str, object],
+) -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/webhooks/{route}",
+            json={"type": event_type, "data": data},
+        )
+        evidence = (await client.get("/requests")).json()["requests"][0]
+
+    assert response.status_code == 200
+    assert response.json()["code"] == "accepted"
+    assert evidence["receiver_route"] == route
+
+
+@pytest.mark.asyncio
+async def test_invalid_order_is_rejected_by_its_body_while_receiver_is_healthy() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        configured = await client.put(
+            "/control?run_id=invalid-order",
+            json={"mode": "success", "failures_before_success": 0, "delay_ms": 0},
+        )
+        response = await client.post(
+            "/webhooks/orders",
+            json={
+                "type": "order.paid",
+                "data": {
+                    "order_id": "ORDER-INVALID",
+                    "amount_cents": 12_900,
+                    "currency": "USD",
+                },
+            },
+            headers={"X-EventHarbor-Demo-Run-Id": "invalid-order"},
+        )
+
+    assert configured.json()["configuration"]["mode"] == "success"
+    assert response.status_code == 400
+    assert response.json() == {
+        "code": "missing_customer_id",
+        "detail": "data.customer_id is required.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_named_receiver_route_rejects_an_event_for_a_different_consumer() -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/webhooks/shipping",
+            json={
+                "type": "order.paid",
+                "data": {
+                    "order_id": "ORDER-1",
+                    "customer_id": "CUS-1",
+                    "amount_cents": 12_900,
+                    "currency": "USD",
+                },
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "code": "wrong_receiver_route",
+        "detail": "order.paid must be sent to /webhooks/orders.",
     }
 
 

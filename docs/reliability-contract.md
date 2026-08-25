@@ -51,6 +51,11 @@ generation linked to the original; it does not rewrite historical attempts.
   deleted, renumbered, or moved.
 - A disabled endpoint blocks replay. Operators must repair and enable the
   destination before approving another delivery generation.
+- A positively identified immutable-payload rejection, such as Receiver Lab's
+  structured HTTP `400 missing_customer_id` response, blocks unchanged replay.
+  The caller must publish corrected data. Other terminal responses, such as
+  authentication or route failures, remain reviewable because external repair
+  may make a deliberate replay valid.
 - Only one nonterminal generation may be active in a delivery chain. An attempt
   to replay an older, superseded generation or create a second active
   generation returns `409 Conflict`.

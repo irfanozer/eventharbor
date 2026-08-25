@@ -24,11 +24,17 @@ export type DemoScenarioId =
   | "rate_limit_recovery"
   | "permanent_rejection";
 
-/** Editable business data used by the recruiter-facing reliability story. */
+export type DemoEventTypeId =
+  | "order.paid"
+  | "shipment.dispatched"
+  | "inventory.threshold_reached";
+
+export type DemoEventDataValue = string | number;
+
+/** Exact editable business event used by the recruiter-facing reliability story. */
 export interface DemoEventPayload {
-  order_id: string;
-  amount_cents: number;
-  note: string;
+  type: DemoEventTypeId;
+  data: Record<string, DemoEventDataValue>;
 }
 
 export interface Endpoint {
@@ -136,6 +142,7 @@ export interface DeadLetterItem {
   endpoint: Endpoint;
   delivery: Delivery;
   replayable: boolean;
+  blocked_code: "endpoint_disabled" | "payload_correction_required" | null;
   blocked_reason: string | null;
 }
 
@@ -152,6 +159,8 @@ export interface ReceiverLabRequest {
   event_id: string | null;
   delivery_id: string | null;
   event_type: string | null;
+  /** Named Receiver Lab path that received this request. */
+  receiver_route?: string;
   /** Attempt number supplied by the EventHarbor worker. */
   delivery_attempt: number | null;
   /** Epoch seconds included in the signed EventHarbor request. */

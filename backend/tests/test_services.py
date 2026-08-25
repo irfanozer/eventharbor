@@ -6,9 +6,10 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from eventharbor.deliveries.retry import DeliveryDisposition
 from eventharbor.deliveries.state_machine import DeliveryStatus
 from eventharbor.errors import DomainError
-from eventharbor.models import Delivery, Endpoint, Event
+from eventharbor.models import Delivery, DeliveryAttempt, Endpoint, Event
 from eventharbor.schemas import EndpointCreateRequest, EventPublishRequest
 from eventharbor.serialization import canonical_sha256
 from eventharbor.services import EndpointService, EventService, QueryService, ReplayService
@@ -192,6 +193,22 @@ async def test_endpoint_service_reveals_generated_secret_once() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["orders", "shipping", "inventory"])
+async def test_endpoint_service_allows_each_named_receiver_lab_route(route: str) -> None:
+    repository = FakeEndpointRepository()
+    service = EndpointService(repository, "http://receiver-lab:8100/webhooks")
+
+    result = await service.create(
+        EndpointCreateRequest(
+            name=f"{route.title()} receiver",
+            url=f"http://receiver-lab:8100/webhooks/{route}",
+        )
+    )
+
+    assert result.endpoint.target_url.endswith(f"/webhooks/{route}")
+
+
+@pytest.mark.asyncio
 async def test_endpoint_service_rejects_every_unconfigured_url() -> None:
     service = EndpointService(FakeEndpointRepository(), "http://receiver-lab:8100/webhooks")
 
@@ -360,6 +377,7 @@ async def test_replay_returns_existing_request_before_rechecking_eligibility() -
         ("superseded", "replay_source_superseded"),
         ("active", "active_delivery_exists"),
         ("endpoint_disabled", "endpoint_disabled"),
+        ("terminal_payload", "payload_correction_required"),
     ],
 )
 async def test_replay_rejects_unsafe_requests(case: str, expected_code: str) -> None:
@@ -381,6 +399,16 @@ async def test_replay_rejects_unsafe_requests(case: str, expected_code: str) -> 
     deliveries = FakeDeliveryRepository(source, latest=latest, active=active)
     if case == "missing":
         deliveries.initial = None
+    if case == "terminal_payload":
+        deliveries.attempts = [
+            DeliveryAttempt(
+                disposition=DeliveryDisposition.TERMINAL_FAILURE,
+                http_status_code=400,
+                response_body_excerpt=(
+                    '{"code":"missing_customer_id","detail":"data.customer_id is required."}'
+                ),
+            )
+        ]
     service = ReplayService(
         FakeEndpointRepository(target),
         FakeEventRepository(inserted=False, existing=existing_event),
@@ -392,6 +420,33 @@ async def test_replay_rejects_unsafe_requests(case: str, expected_code: str) -> 
 
     assert raised.value.status_code in {404, 409}
     assert raised.value.code == expected_code
+
+
+@pytest.mark.asyncio
+async def test_replay_allows_terminal_auth_failure_after_external_repair() -> None:
+    target = endpoint()
+    request = EventPublishRequest(endpoint_id=target.id, type="invoice.paid", data={})
+    existing_event = event_for(request, "publish-key")
+    source = delivery_for(existing_event, target)
+    source.status = DeliveryStatus.DEAD_LETTERED
+    deliveries = FakeDeliveryRepository(source)
+    deliveries.attempts = [
+        DeliveryAttempt(
+            disposition=DeliveryDisposition.TERMINAL_FAILURE,
+            http_status_code=401,
+            response_body_excerpt='{"code":"invalid_signature"}',
+        )
+    ]
+    service = ReplayService(
+        FakeEndpointRepository(target),
+        FakeEventRepository(inserted=False, existing=existing_event),
+        deliveries,
+    )
+
+    result = await service.replay(source.id, "auth-repaired-replay")
+
+    assert result.delivery is deliveries.created
+    assert result.delivery.status == DeliveryStatus.PENDING
 
 
 @pytest.mark.asyncio

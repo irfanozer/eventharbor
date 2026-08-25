@@ -6,7 +6,7 @@ import { getOverview } from "../api";
 const navigation = [
   { to: "/", label: "Control room", end: true },
   { to: "/events", label: "Events", end: false },
-  { to: "/dead-letters", label: "Dead letters", end: false },
+  { to: "/dead-letters", label: "Stopped deliveries", end: false },
   { to: "/endpoints", label: "Endpoints", end: false },
 ];
 
@@ -55,4 +55,3 @@ export function AppShell() {
     </div>
   );
 }
-

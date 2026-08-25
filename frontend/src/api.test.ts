@@ -4,10 +4,10 @@ import {
   ensureReceiverLabEndpoint,
   getReceiverLab,
   publishDemoEvent,
-  RECEIVER_LAB_URL,
   replayDelivery,
   setReceiverLabPreset,
 } from "./api";
+import { demoEventDefinition } from "./demoEvents";
 
 const now = "2026-08-24T12:00:00Z";
 
@@ -24,10 +24,11 @@ afterEach(() => {
 
 describe("Receiver Lab endpoint setup", () => {
   it("reuses an enabled Receiver Lab endpoint", async () => {
+    const definition = demoEventDefinition("order.paid");
     const endpoint = {
       id: "endpoint-1",
-      name: "Receiver Lab",
-      url: RECEIVER_LAB_URL,
+      name: "Earlier label for the same orders route",
+      url: definition.destinationUrl,
       enabled: true,
       secret_version: 1,
       created_at: now,
@@ -41,12 +42,13 @@ describe("Receiver Lab endpoint setup", () => {
   });
 
   it("registers the lab but never returns its one-time signing secret", async () => {
+    const definition = demoEventDefinition("order.paid");
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ items: [], next_cursor: null }))
       .mockResolvedValueOnce(jsonResponse({
         id: "endpoint-2",
-        name: "Receiver Lab · Control Room",
-        url: RECEIVER_LAB_URL,
+        name: definition.destinationName,
+        url: definition.destinationUrl,
         enabled: true,
         signing_secret: "one-time-sensitive-value",
         secret_version: 1,
@@ -65,8 +67,8 @@ describe("Receiver Lab endpoint setup", () => {
     );
     const request = fetchMock.mock.calls[1]?.[1] as RequestInit;
     expect(JSON.parse(String(request.body))).toEqual({
-      name: "Receiver Lab · Control Room",
-      url: RECEIVER_LAB_URL,
+      name: definition.destinationName,
+      url: definition.destinationUrl,
     });
   });
 });
@@ -77,7 +79,7 @@ describe("Reliability story idempotency", () => {
       event_id: "event-1",
       delivery_id: "delivery-0",
       endpoint_id: "endpoint-1",
-      type: "demo.order.paid",
+      type: "order.paid",
       status: "pending",
       created_at: now,
     }, 202));
@@ -91,14 +93,15 @@ describe("Reliability story idempotency", () => {
     }));
     expect(JSON.parse(String(request.body))).toEqual({
       endpoint_id: "endpoint-1",
-      type: "demo.order.paid",
+      type: "order.paid",
       data: {
         run_id: "stable-run",
         scenario: "outage_replay",
         purpose: "reliability-story",
         order_id: "ORDER-STABLE-R",
+        customer_id: "CUS-STABLE",
         amount_cents: 12_900,
-        note: "Route to fulfillment after payment confirmation",
+        currency: "USD",
       },
     });
   });
@@ -108,29 +111,34 @@ describe("Reliability story idempotency", () => {
       event_id: "event-1",
       delivery_id: "delivery-0",
       endpoint_id: "endpoint-1",
-      type: "demo.order.paid",
+      type: "order.paid",
       status: "pending",
       created_at: now,
     }, 202));
     vi.stubGlobal("fetch", fetchMock);
 
     await publishDemoEvent("endpoint-1", "run-custom", "stable-publish-key", {
-      order_id: "ORDER-RECRUITER-7",
-      amount_cents: 54_321,
-      note: "Leave with the front desk",
+      type: "shipment.dispatched",
+      data: {
+        shipment_id: "SHIP-RECRUITER-7",
+        order_id: "ORDER-RECRUITER-7",
+        carrier: "DHL",
+        tracking_number: "DHL-123-US",
+      },
     });
 
     const request = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(JSON.parse(String(request.body))).toEqual({
       endpoint_id: "endpoint-1",
-      type: "demo.order.paid",
+      type: "shipment.dispatched",
       data: {
         run_id: "run-custom",
         scenario: "outage_replay",
         purpose: "reliability-story",
+        shipment_id: "SHIP-RECRUITER-7",
         order_id: "ORDER-RECRUITER-7",
-        amount_cents: 54_321,
-        note: "Leave with the front desk",
+        carrier: "DHL",
+        tracking_number: "DHL-123-US",
       },
     });
   });
@@ -140,7 +148,7 @@ describe("Reliability story idempotency", () => {
       event_id: "event-1",
       delivery_id: "delivery-0",
       endpoint_id: "endpoint-1",
-      type: "demo.order.paid",
+      type: "order.paid",
       status: "pending",
       created_at: now,
     }, 202));
@@ -150,7 +158,15 @@ describe("Reliability story idempotency", () => {
       "endpoint-1",
       "validation-run",
       "validation-publish-key",
-      { order_id: "ORDER-INVALID", amount_cents: 12_900, note: "Missing customer" },
+      {
+        type: "order.paid",
+        data: {
+          order_id: "ORDER-INVALID",
+          customer_id: "CUS-WILL-BE-OMITTED",
+          amount_cents: 12_900,
+          currency: "USD",
+        },
+      },
       "permanent_rejection",
     );
 
@@ -158,6 +174,7 @@ describe("Reliability story idempotency", () => {
     const body = JSON.parse(String(request.body)) as { data: Record<string, unknown> };
     expect(body.data.scenario).toBe("permanent_rejection");
     expect(body.data).not.toHaveProperty("customer_id");
+    expect(body.data.order_id).toBe("ORDER-INVALID");
   });
 
   it("replays with the caller's stable key", async () => {
@@ -191,7 +208,7 @@ describe("Receiver Lab evidence", () => {
       attempt: 1,
       event_id: "event-1",
       delivery_id: "delivery-1",
-      event_type: "demo.order.paid",
+      event_type: "order.paid",
       delivery_attempt: 1,
       request_timestamp: 1_777_070_400,
       received_at: now,

@@ -8,8 +8,13 @@ from fastapi import APIRouter, Depends, Header, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from eventharbor.config import Settings, get_settings
-from eventharbor.control_room import ControlRoomQueryService, ControlRoomRepository
+from eventharbor.control_room import (
+    ControlRoomQueryService,
+    ControlRoomRepository,
+    DeadLetterRecord,
+)
 from eventharbor.database import get_session
+from eventharbor.deliveries.retry import ReplayBlockCode, replay_block_code
 from eventharbor.deliveries.state_machine import DeliveryStatus
 from eventharbor.demo import ReceiverLabDemoService
 from eventharbor.demo_runs import DEMO_RUN_ID_MAX_LENGTH, DEMO_RUN_ID_PATTERN
@@ -67,6 +72,32 @@ def _endpoint_response(endpoint: Endpoint) -> EndpointPublicResponse:
         secret_version=endpoint.secret_version,
         created_at=endpoint.created_at,
         updated_at=endpoint.updated_at,
+    )
+
+
+def _dead_letter_response(item: DeadLetterRecord) -> DeadLetterItemResponse:
+    block_code = replay_block_code(
+        item.last_http_status_code,
+        item.last_response_body_excerpt,
+    )
+    if block_code is None and not item.endpoint.enabled:
+        block_code = ReplayBlockCode.ENDPOINT_DISABLED
+    blocked_reasons = {
+        ReplayBlockCode.PAYLOAD_CORRECTION_REQUIRED: (
+            "Payload correction required. Publish a corrected event instead of "
+            "replaying the unchanged body."
+        ),
+        ReplayBlockCode.ENDPOINT_DISABLED: "Endpoint is disabled.",
+    }
+    return DeadLetterItemResponse(
+        event_id=item.event.id,
+        event_type=item.event.event_type,
+        event_created_at=item.event.created_at,
+        endpoint=_endpoint_response(item.endpoint),
+        delivery=_delivery_response(item.delivery),
+        replayable=block_code is None,
+        blocked_code=block_code,
+        blocked_reason=blocked_reasons.get(block_code) if block_code is not None else None,
     )
 
 
@@ -380,18 +411,7 @@ async def list_dead_letters(
         )
     _disable_cache(response)
     return DeadLetterListResponse(
-        items=[
-            DeadLetterItemResponse(
-                event_id=item.event.id,
-                event_type=item.event.event_type,
-                event_created_at=item.event.created_at,
-                endpoint=_endpoint_response(item.endpoint),
-                delivery=_delivery_response(item.delivery),
-                replayable=item.endpoint.enabled,
-                blocked_reason=None if item.endpoint.enabled else "Endpoint is disabled.",
-            )
-            for item in page.items
-        ],
+        items=[_dead_letter_response(item) for item in page.items],
         next_cursor=page.next_cursor,
     )
 

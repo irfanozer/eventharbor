@@ -70,7 +70,7 @@ where the event is. The dominant status can report, for example:
 
 ```text
 POSTGRESQL · SAFE
-WORKER -> RECEIVER · G0 REQUEST 2
+WORKER -> RECEIVER · ORIGINAL REQUEST 2
 RETRY SCHEDULER · BACKPRESSURE
 DEAD LETTER · STOPPED
 DELIVERED · VERIFIED
@@ -94,9 +94,9 @@ Each scenario is server owned, reproducible, and isolated by run ID.
 
 | Recruiter scenario | Actual receiver sequence | Expected EventHarbor result |
 | --- | --- | --- |
-| Destination outage | `503, 503, 503, 503`, repair, then G1 `200` | Dead letter plus explicit replay |
-| Brief service outage | `503, 503, 200` | Generation 0 recovers automatically |
-| API rate limit | `429, 429, 200`, with `Retry-After: 2` on each `429` | Worker follows receiver backpressure and generation 0 delivers |
+| Destination outage | `503, 503, 503, 503`, restore health, then replay `200` | Stopped and saved plus explicit replay |
+| Brief service outage | `503, 503, 200` | Original delivery recovers automatically |
+| API rate limit | `429, 429, 200`, with `Retry-After: 2` on each `429` | Worker follows receiver backpressure and the original delivery succeeds |
 | Invalid request | one `400` | Terminal classification; no pointless retry |
 
 The default destination-outage action runs the complete recovery story from one
@@ -108,18 +108,18 @@ underlying step still uses the normal API and persistence boundaries:
 3. Publish a synthetic event with a new idempotency key.
 4. Poll the persisted event and attempt APIs while the worker performs four
    real HTTP requests that receive `503`.
-5. Wait until generation 0 is durably `dead_lettered`.
-6. Repair Receiver Lab by explicitly changing it to the `success` preset.
-7. Explicitly approve a replay through the replay API, appending generation 1.
-8. Watch the worker send generation 1, receive HTTP `200`, and persist it as
+5. Wait until the original delivery is durably `dead_lettered`.
+6. Restore Receiver Lab health by explicitly changing it to the `success` preset.
+7. Explicitly approve a replay through the replay API, appending a recovery delivery.
+8. Watch the worker send the recovery delivery, receive HTTP `200`, and persist it as
    `delivered`.
 
 The interface advances as PostgreSQL-backed evidence appears; it does not fake
 progress with a scripted animation or depend on a fixed sleep. The final view
-retains generation 0 and all four failed attempts beside the successful
-generation 1 attempt.
+retains the original delivery and all four failed attempts beside the successful
+recovery request.
 
-The response history separates generation 0 from generation 1 in two compact
+The response history separates the original delivery from the recovery replay in two compact
 rows. A visible recovery boundary states that there is **no fifth automatic
 retry**: the successful request is request 1 of a new delivery generation,
 created only after the receiver is changed from `503` to `200` and a replay is
@@ -148,21 +148,21 @@ The selected recovery actor is stored with the browser's active story. Once an
 event starts, the Guided/Operator selector is locked, so a later UI toggle or
 reload cannot relabel a guided replay as a human-approved operator action.
 
-The automatic repair and replay approval are **presentation orchestration** for
+The automatic receiver-state change and replay approval are **presentation orchestration** for
 the guided local demo. They do not mean that EventHarbor automatically replays
-dead letters in normal operation. The controller makes a distinct repair call
+stopped deliveries in normal operation. The controller makes a distinct Receiver Lab control call
 and an explicit, idempotent replay command after observing the terminal state,
 the same operations an operator can choose manually.
 
 ## Secondary operator mode
 
 Operator mode leaves the recovery decision with the visitor. It performs the
-same publish-and-fail setup, then pauses after generation 0 becomes
+same publish-and-fail setup, then pauses after the original delivery becomes
 `dead_lettered`. The visitor can inspect the four persisted `503` attempts,
-choose **Repair receiver**, review the replay warning, and choose **Approve
-replay**. This mode is useful for a deeper engineering conversation because it
-makes the boundary between repairing a destination and creating new delivery
-work explicit.
+choose **Restore test receiver health**, review the replay warning, and choose
+**Approve and replay**. This mode is useful for a deeper engineering
+conversation because it makes the boundary between an external destination
+becoming healthy and EventHarbor creating new delivery work explicit.
 
 With an already healthy local stack, the complete guided story usually finishes
 within 15 seconds. A 90-second safety timeout protects the interface when a
@@ -175,8 +175,8 @@ Room scopes receiver reads and preset changes with `?run_id=...`; the worker
 copies the same identifier from the immutable event payload into the internal
 `X-EventHarbor-Demo-Run-Id` header. Receiver Lab therefore keeps an independent
 configuration, attempt counter, sequence, and bounded receipt history for each
-active run. One visitor repairing a receiver cannot turn another visitor's
-generation 0 requests into successes.
+active run. One visitor restoring receiver health cannot turn another visitor's
+original requests into successes.
 
 Receiver Lab keeps at most 100 scoped runs using least-recently-used eviction,
 and each run retains at most 100 observations. Unscoped control calls remain as

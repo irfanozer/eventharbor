@@ -1,5 +1,6 @@
 """Retry classification and deterministic backoff calculations."""
 
+import json
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -12,7 +13,51 @@ class DeliveryDisposition(StrEnum):
     TERMINAL_FAILURE = "terminal_failure"
 
 
+class ReplayBlockCode(StrEnum):
+    """Machine-readable reasons an unchanged delivery must not be replayed."""
+
+    ENDPOINT_DISABLED = "endpoint_disabled"
+    PAYLOAD_CORRECTION_REQUIRED = "payload_correction_required"
+
+
 RETRYABLE_STATUS_CODES = frozenset({408, 425, 429})
+RECEIVER_PAYLOAD_ERROR_CODES = frozenset(
+    {
+        "invalid_json",
+        "invalid_payload",
+        "invalid_data",
+        "unsupported_event_type",
+        "invalid_currency",
+        "invalid_quantity_remaining",
+        "invalid_reorder_threshold",
+    }
+)
+
+
+def replay_block_code(
+    http_status_code: int | None,
+    response_body_excerpt: str | None,
+) -> ReplayBlockCode | None:
+    """Recognize Receiver Lab evidence that proves the immutable body is invalid.
+
+    A terminal HTTP disposition alone is intentionally insufficient: authentication,
+    authorization, and route failures may become replayable after external repair.
+    """
+
+    if http_status_code != 400 or response_body_excerpt is None:
+        return None
+    try:
+        response = json.loads(response_body_excerpt)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(response, dict):
+        return None
+    code = response.get("code")
+    if not isinstance(code, str):
+        return None
+    if code.startswith("missing_") or code in RECEIVER_PAYLOAD_ERROR_CODES:
+        return ReplayBlockCode.PAYLOAD_CORRECTION_REQUIRED
+    return None
 
 
 def classify_status_code(status_code: int) -> DeliveryDisposition:

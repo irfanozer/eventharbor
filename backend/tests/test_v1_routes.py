@@ -12,7 +12,7 @@ from eventharbor.control_room import (
     OverviewSnapshot,
     Page,
 )
-from eventharbor.deliveries.retry import DeliveryDisposition
+from eventharbor.deliveries.retry import DeliveryDisposition, ReplayBlockCode
 from eventharbor.deliveries.state_machine import DeliveryAttemptStatus, DeliveryStatus
 from eventharbor.demo import ReceiverLabDemoService
 from eventharbor.errors import DomainError
@@ -354,13 +354,43 @@ async def test_control_room_endpoint_list_and_detail_never_expose_secret(monkeyp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("enabled", "replayable", "blocked_reason"),
-    [(True, True, None), (False, False, "Endpoint is disabled.")],
+    (
+        "enabled",
+        "last_http_status_code",
+        "last_response_body_excerpt",
+        "replayable",
+        "blocked_code",
+        "blocked_reason",
+    ),
+    [
+        (True, 503, '{"code":"temporarily_unavailable"}', True, None, None),
+        (
+            False,
+            503,
+            '{"code":"temporarily_unavailable"}',
+            False,
+            ReplayBlockCode.ENDPOINT_DISABLED,
+            "Endpoint is disabled.",
+        ),
+        (
+            True,
+            400,
+            '{"code":"missing_customer_id"}',
+            False,
+            ReplayBlockCode.PAYLOAD_CORRECTION_REQUIRED,
+            "Payload correction required. Publish a corrected event instead of "
+            "replaying the unchanged body.",
+        ),
+        (True, 401, '{"code":"invalid_signature"}', True, None, None),
+    ],
 )
 async def test_dead_letter_list_explains_replay_eligibility(
     monkeypatch,
     enabled: bool,
+    last_http_status_code: int,
+    last_response_body_excerpt: str,
     replayable: bool,
+    blocked_code: ReplayBlockCode | None,
     blocked_reason: str | None,
 ) -> None:
     endpoint, event, delivery, _ = objects()
@@ -371,7 +401,13 @@ async def test_dead_letter_list_explains_replay_eligibility(
     async def fake_dead_letters(service, **kwargs):
         assert kwargs == {"limit": 25, "cursor": None, "endpoint_id": endpoint.id}
         return Page(
-            items=[DeadLetterRecord(event=event, delivery=delivery, endpoint=endpoint)],
+            items=[DeadLetterRecord(
+                event=event,
+                delivery=delivery,
+                endpoint=endpoint,
+                last_http_status_code=last_http_status_code,
+                last_response_body_excerpt=last_response_body_excerpt,
+            )],
             next_cursor=None,
         )
 
@@ -389,6 +425,7 @@ async def test_dead_letter_list_explains_replay_eligibility(
     assert response.headers["Cache-Control"] == "no-store"
     assert result.items[0].event_id == event.id
     assert result.items[0].replayable is replayable
+    assert result.items[0].blocked_code == blocked_code
     assert result.items[0].blocked_reason == blocked_reason
 
 

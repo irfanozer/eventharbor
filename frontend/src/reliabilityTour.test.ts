@@ -7,6 +7,7 @@ import {
 } from "./reliabilityTour";
 import type {
   Delivery,
+  DeliveryAttempt,
   DemoEventPayload,
   Endpoint,
   EventAccepted,
@@ -17,6 +18,26 @@ import type {
 } from "./types";
 
 const now = "2026-08-24T12:00:00Z";
+
+function missingCustomerAttempt(): DeliveryAttempt {
+  return {
+    id: "attempt-1",
+    attempt_number: 1,
+    status: "completed",
+    disposition: "terminal_failure",
+    http_status_code: 400,
+    error_type: null,
+    error_message: null,
+    response_body_excerpt: '{"code":"missing_customer_id","detail":"data.customer_id is required."}',
+    duration_ms: 4,
+    request_timestamp: 1_777_070_400,
+    retry_scheduled_for: null,
+    started_at: now,
+    finished_at: now,
+    resolved_at: now,
+    created_at: now,
+  };
+}
 
 function delivery(
   id: string,
@@ -45,8 +66,8 @@ function event(...deliveries: Delivery[]): EventDetail {
   return {
     id: "event-1",
     source: "local-api",
-    type: "demo.order.paid",
-    data: { run_id: "run-1" },
+    type: "order.paid",
+    data: { run_id: "run-1", order_id: "ORDER-1", customer_id: "CUS-1", amount_cents: 12_900, currency: "USD" },
     payload_sha256: "a".repeat(64),
     request_fingerprint_sha256: "b".repeat(64),
     idempotency_key: "control-room-story-run-1",
@@ -72,7 +93,7 @@ function endpoint(): Endpoint {
   return {
     id: "endpoint-1",
     name: "Receiver Lab",
-    url: "http://receiver-lab:8100/webhooks",
+    url: "http://receiver-lab:8100/webhooks/orders",
     enabled: true,
     secret_version: 1,
     created_at: now,
@@ -85,7 +106,7 @@ function accepted(): EventAccepted {
     event_id: "event-1",
     delivery_id: "delivery-0",
     endpoint_id: "endpoint-1",
-    type: "demo.order.paid",
+    type: "order.paid",
     status: "pending",
     created_at: now,
   };
@@ -121,6 +142,10 @@ function dependencies(
       if (!next) throw new Error("test event queue exhausted");
       return next;
     }),
+    getDeliveryAttempts: vi.fn(async (deliveryId: string) => ({
+      delivery: delivery(deliveryId, 0, "dead_lettered", 1),
+      attempts: [missingCustomerAttempt()],
+    })),
     replayDelivery: vi.fn(async () => replayAccepted()),
     wait: vi.fn(async (durationMs: number) => {
       clock += durationMs;
@@ -152,9 +177,13 @@ describe("runReliabilityTour", () => {
     ]);
     const updates: ReliabilityTourProgress[] = [];
     const payload: DemoEventPayload = {
-      order_id: "ORDER-RECRUITER-7",
-      amount_cents: 54_321,
-      note: "Leave with the front desk",
+      type: "order.paid",
+      data: {
+        order_id: "ORDER-RECRUITER-7",
+        customer_id: "CUS-7",
+        amount_cents: 54_321,
+        currency: "USD",
+      },
     };
 
     const result = await runReliabilityTour(deps, {
@@ -172,6 +201,7 @@ describe("runReliabilityTour", () => {
     expect(result.sourceDeliveryId).toBe("delivery-0");
     expect(result.replayDeliveryId).toBe("delivery-1");
     expect(result.payload).toEqual(payload);
+    expect(deps.ensureReceiverLabEndpoint).toHaveBeenCalledWith("order.paid");
     expect(deps.publishDemoEvent).toHaveBeenCalledWith(
       "endpoint-1",
       "run-1",
@@ -213,9 +243,13 @@ describe("runReliabilityTour", () => {
     );
     const { deps } = dependencies([containedEvent, replayingEvent, verifiedEvent]);
     const payload: DemoEventPayload = {
-      order_id: "ORDER-RESUME-9",
-      amount_cents: 8_765,
-      note: "Keep this exact input",
+      type: "order.paid",
+      data: {
+        order_id: "ORDER-RESUME-9",
+        customer_id: "CUS-9",
+        amount_cents: 8_765,
+        currency: "USD",
+      },
     };
 
     const result = await runReliabilityTour(deps, {
@@ -303,7 +337,32 @@ describe("runReliabilityTour", () => {
     expect(result.attemptCount).toBe(1);
     expect(result.message).toContain("data.customer_id is missing");
     expect(result.message).toContain("stopped after one attempt");
-    expect(setReceiverLabPreset).toHaveBeenCalledWith("permanent_failure", "run-1");
+    expect(setReceiverLabPreset).toHaveBeenCalledWith("success", "run-1");
+    expect(deps.replayDelivery).not.toHaveBeenCalled();
+  });
+
+  it("does not claim a missing-field success story when the persisted HTTP 400 is different", async () => {
+    const acceptedEvent = event(delivery("delivery-0", 0, "pending", 0));
+    const rejectedEvent = event(delivery("delivery-0", 0, "dead_lettered", 1));
+    const { deps } = dependencies([acceptedEvent, rejectedEvent]);
+    vi.mocked(deps.getDeliveryAttempts).mockResolvedValue({
+      delivery: delivery("delivery-0", 0, "dead_lettered", 1),
+      attempts: [{
+        ...missingCustomerAttempt(),
+        response_body_excerpt: '{"code":"invalid_signature","detail":"signature mismatch"}',
+      }],
+    });
+
+    const result = await runReliabilityTour(deps, {
+      runId: "run-1",
+      scenarioId: "permanent_rejection",
+      pollIntervalMs: 10,
+      presentationPauseMs: 0,
+      timeoutMs: 1_000,
+    });
+
+    expect(result.phase).toBe("failed");
+    expect(result.message).toContain("did not prove the expected missing_customer_id");
     expect(deps.replayDelivery).not.toHaveBeenCalled();
   });
 

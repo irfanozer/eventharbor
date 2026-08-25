@@ -29,7 +29,7 @@ export function statusLabel(status: DeliveryStatus): string {
     in_progress: "In progress",
     retry_wait: "Retry scheduled",
     delivered: "Delivered",
-    dead_lettered: "Dead lettered",
+    dead_lettered: "Stopped · saved",
   };
   return labels[status];
 }
@@ -47,4 +47,3 @@ export function dispositionLabel(disposition: DeliveryDisposition | null): strin
 export function prettyJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
-

@@ -275,8 +275,8 @@ export function LiveNetworkTrace({
   const receiverStatusLabel = {
     loading: "Checking receiver state…",
     unavailable: "Receiver state unavailable",
-    offline: "HTTP 503 offline",
-    online: "HTTP 200 online",
+    offline: "HTTP 503 unavailable",
+    online: "HTTP 200 healthy",
   }[receiverStatus];
   const repairPath = `/api/v1/demo/receiver-lab${runId ? `?run_id=${encodeURIComponent(runId)}` : ""}`;
   const replayPath = originalDelivery
@@ -362,7 +362,7 @@ export function LiveNetworkTrace({
             <li data-complete={repairOccurred}>
               {repairOccurred
                 ? <>{recoveryActor} sent <code>PUT {repairPath}</code> and changed this run from HTTP 503 to HTTP 200.</>
-                : `${recoveryActor} has not sent the receiver repair request yet.`}
+                : `${recoveryActor} has not sent the receiver health-change request yet.`}
             </li>
             <li data-complete={replayOccurred}>
               {replayOccurred

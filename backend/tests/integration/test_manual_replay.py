@@ -188,6 +188,7 @@ async def test_dead_letter_repair_and_idempotent_replay_preserve_source_history(
         receiver_lab_url=RECEIVER_URL,
         worker_http_timeout_seconds=1,
         worker_lease_seconds=5,
+        worker_max_attempts=1,
         worker_base_delay_seconds=0.01,
         worker_max_delay_seconds=0.1,
         _env_file=None,
@@ -213,8 +214,8 @@ async def test_dead_letter_repair_and_idempotent_replay_preserve_source_history(
             configured_failure = await receiver.put(
                 "/control",
                 json={
-                    "mode": "permanent_failure",
-                    "failures_before_success": 0,
+                    "mode": "fail_then_succeed",
+                    "failures_before_success": 20,
                     "delay_ms": 0,
                 },
             )
@@ -256,11 +257,11 @@ async def test_dead_letter_repair_and_idempotent_replay_preserve_source_history(
             assert source_before["delivery"]["status"] == "dead_lettered"
             assert source_before["delivery"]["replay_generation"] == 0
             assert len(source_before["attempts"]) == 1
-            assert source_before["attempts"][0]["disposition"] == "terminal_failure"
-            assert source_before["attempts"][0]["http_status_code"] == 400
+            assert source_before["attempts"][0]["disposition"] == "retry"
+            assert source_before["attempts"][0]["http_status_code"] == 503
             assert json.loads(source_before["attempts"][0]["response_body_excerpt"]) == {
-                "code": "missing_customer_id",
-                "detail": "data.customer_id is required.",
+                "code": "temporarily_unavailable",
+                "detail": "Receiver Lab is in the controlled unavailable state.",
             }
 
             missing = await api.post(
@@ -375,7 +376,7 @@ async def test_dead_letter_repair_and_idempotent_replay_preserve_source_history(
             ]
             assert [
                 request["response_status_code"] for request in receiver_requests["requests"]
-            ] == [400, 200]
+            ] == [503, 200]
 
             # Same request lookup happens before current eligibility checks, so a
             # lost 202 response remains safely recoverable after delivery succeeds.

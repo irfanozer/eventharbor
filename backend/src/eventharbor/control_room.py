@@ -14,7 +14,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from eventharbor.deliveries.state_machine import DeliveryStatus
 from eventharbor.errors import DomainError
-from eventharbor.models import Delivery, Endpoint, Event
+from eventharbor.models import Delivery, DeliveryAttempt, Endpoint, Event
 
 PageItem = TypeVar("PageItem")
 
@@ -55,6 +55,8 @@ class DeadLetterRecord:
     event: Event
     delivery: Delivery
     endpoint: Endpoint
+    last_http_status_code: int | None = None
+    last_response_body_excerpt: str | None = None
 
 
 def encode_cursor(cursor: PageCursor) -> str:
@@ -245,8 +247,30 @@ class ControlRoomRepository:
             )
         if endpoint_id is not None:
             conditions.append(Delivery.endpoint_id == endpoint_id)
+        last_http_status_code = (
+            select(DeliveryAttempt.http_status_code)
+            .where(DeliveryAttempt.delivery_id == Delivery.id)
+            .order_by(DeliveryAttempt.attempt_number.desc())
+            .limit(1)
+            .correlate(Delivery)
+            .scalar_subquery()
+        )
+        last_response_body_excerpt = (
+            select(DeliveryAttempt.response_body_excerpt)
+            .where(DeliveryAttempt.delivery_id == Delivery.id)
+            .order_by(DeliveryAttempt.attempt_number.desc())
+            .limit(1)
+            .correlate(Delivery)
+            .scalar_subquery()
+        )
         statement = (
-            select(Event, Delivery, Endpoint)
+            select(
+                Event,
+                Delivery,
+                Endpoint,
+                last_http_status_code.label("last_http_status_code"),
+                last_response_body_excerpt.label("last_response_body_excerpt"),
+            )
             .join(Event, Event.id == Delivery.event_id)
             .join(Endpoint, Endpoint.id == Delivery.endpoint_id)
             .where(*conditions)
@@ -256,8 +280,14 @@ class ControlRoomRepository:
         rows = (await self._session.execute(statement)).all()
         visible = rows[:limit]
         records = [
-            DeadLetterRecord(event=event, delivery=delivery, endpoint=endpoint)
-            for event, delivery, endpoint in visible
+            DeadLetterRecord(
+                event=event,
+                delivery=delivery,
+                endpoint=endpoint,
+                last_http_status_code=http_status_code,
+                last_response_body_excerpt=response_body_excerpt,
+            )
+            for event, delivery, endpoint, http_status_code, response_body_excerpt in visible
         ]
         next_cursor = None
         if len(rows) > limit and records:

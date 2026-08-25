@@ -4,8 +4,10 @@ from hypothesis import strategies as st
 
 from eventharbor.deliveries.retry import (
     DeliveryDisposition,
+    ReplayBlockCode,
     RetryPolicy,
     classify_status_code,
+    replay_block_code,
 )
 
 
@@ -22,6 +24,34 @@ def test_transient_responses_are_retryable(status_code: int) -> None:
 @pytest.mark.parametrize("status_code", [400, 401, 403, 404, 422])
 def test_other_client_errors_are_terminal(status_code: int) -> None:
     assert classify_status_code(status_code) == DeliveryDisposition.TERMINAL_FAILURE
+
+
+@pytest.mark.parametrize(
+    "response_body",
+    [
+        '{"code":"missing_customer_id","detail":"required"}',
+        '{"code":"invalid_currency","detail":"invalid"}',
+    ],
+)
+def test_structured_payload_rejections_block_unchanged_replay(response_body: str) -> None:
+    assert replay_block_code(400, response_body) == ReplayBlockCode.PAYLOAD_CORRECTION_REQUIRED
+
+
+@pytest.mark.parametrize(
+    ("status_code", "response_body"),
+    [
+        (401, '{"code":"invalid_signature"}'),
+        (403, '{"code":"forbidden"}'),
+        (404, '{"code":"route_not_found"}'),
+        (400, '{"code":"wrong_receiver_route"}'),
+        (400, "not-json"),
+    ],
+)
+def test_terminal_responses_without_payload_proof_remain_reviewable_for_replay(
+    status_code: int,
+    response_body: str,
+) -> None:
+    assert replay_block_code(status_code, response_body) is None
 
 
 def test_backoff_is_bounded_and_reproducible() -> None:

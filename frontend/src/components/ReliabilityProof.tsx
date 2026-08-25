@@ -58,7 +58,7 @@ const STORY_STEPS: ReadonlyArray<{
   {
     id: "replaying",
     label: "Controlled recovery",
-    explanation: "Repair the receiver and append a replay generation.",
+    explanation: "Restore receiver health and append a replay delivery.",
   },
   {
     id: "verified",
@@ -74,7 +74,7 @@ const NARRATIVE_COPY: Record<
   ready: {
     index: "01",
     eyebrow: "Ready",
-    title: "A customer system is about to go offline.",
+    title: "A customer system is about to become unavailable.",
   },
   accepted: {
     index: "02",
@@ -124,9 +124,9 @@ function narrativeDescription({
     case "dead_lettered":
       return "The retry budget is exhausted. The delivery is now dead-lettered: a terminal, inspectable state that requires deliberate recovery.";
     case "replaying":
-      return "The demo operator repaired the receiver and approved generation 1. Generation 0 and every failed attempt remain unchanged.";
+      return "The demo operator restored receiver health and approved a replay. The original delivery and every failed attempt remain unchanged.";
     case "verified":
-      return "Generation 1 delivered with HTTP 200. Generation 0 still proves what failed, and generation 1 proves the repaired receiver accepted the replay.";
+      return "The replay delivered with HTTP 200. The original delivery still proves what failed, and the recovery delivery proves the healthy receiver accepted the replay.";
   }
 }
 

@@ -15,9 +15,16 @@ import type {
   ReceiverLabState,
   ReplayAccepted,
 } from "./types";
+import type { DemoEventTypeId } from "./types";
+import {
+  DEFAULT_DEMO_EVENT_TYPE,
+  RECEIVER_LAB_BASE_URL,
+  demoEventDefinition,
+} from "./demoEvents";
 
 const API_ROOT = "/api/v1";
-export const RECEIVER_LAB_URL = "http://receiver-lab:8100/webhooks";
+/** Legacy generic Receiver Lab route retained for older stored demonstrations. */
+export const RECEIVER_LAB_URL = RECEIVER_LAB_BASE_URL;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -128,12 +135,13 @@ interface CreatedEndpoint extends Endpoint {
   signing_secret: string;
 }
 
-async function createReceiverLabEndpoint(): Promise<Endpoint> {
+async function createReceiverLabEndpoint(eventType: DemoEventTypeId): Promise<Endpoint> {
+  const definition = demoEventDefinition(eventType);
   const created = await request<CreatedEndpoint>("/endpoints", {
     method: "POST",
     body: JSON.stringify({
-      name: "Receiver Lab · Control Room",
-      url: RECEIVER_LAB_URL,
+      name: definition.destinationName,
+      url: definition.destinationUrl,
     }),
   });
 
@@ -149,38 +157,54 @@ async function createReceiverLabEndpoint(): Promise<Endpoint> {
   };
 }
 
-export async function ensureReceiverLabEndpoint(): Promise<Endpoint> {
+export async function ensureReceiverLabEndpoint(
+  eventType: DemoEventTypeId = DEFAULT_DEMO_EVENT_TYPE,
+): Promise<Endpoint> {
+  const definition = demoEventDefinition(eventType);
   const endpoints = await getEndpoints({ limit: 100 });
   const existing = endpoints.items.find(
-    (endpoint) => endpoint.url === RECEIVER_LAB_URL && endpoint.enabled,
+    (endpoint) => endpoint.url === definition.destinationUrl && endpoint.enabled,
   );
-  return existing ?? createReceiverLabEndpoint();
+  return existing ?? createReceiverLabEndpoint(eventType);
 }
 
 export function publishDemoEvent(
   endpointId: string,
   runId: string = crypto.randomUUID(),
   idempotencyKey: string = `control-room-story-${runId}`,
-  payload: DemoEventPayload = {
-    order_id: `ORDER-${runId.slice(0, 8).toUpperCase()}`,
-    amount_cents: 12_900,
-    note: "Route to fulfillment after payment confirmation",
-  },
+  payload?: DemoEventPayload,
   scenarioId: DemoScenarioId = "outage_replay",
 ): Promise<EventAccepted> {
+  const suffix = runId.slice(0, 8).toUpperCase();
+  const resolvedPayload: DemoEventPayload = payload ?? {
+    type: DEFAULT_DEMO_EVENT_TYPE,
+    data: {
+      order_id: `ORDER-${suffix}`,
+      customer_id: `CUS-${suffix.slice(0, 6)}`,
+      amount_cents: 12_900,
+      currency: "USD",
+    },
+  };
+  const definition = demoEventDefinition(resolvedPayload.type);
+  const businessData: Record<string, string | number> = { ...resolvedPayload.data };
+
+  // This scenario demonstrates a real schema rejection. The field is visibly
+  // present in the editor, then deliberately omitted from the outbound event.
+  if (scenarioId === "permanent_rejection") {
+    delete businessData[definition.invalidField];
+  }
+
   return request("/events", {
     method: "POST",
     headers: { "Idempotency-Key": idempotencyKey },
     body: JSON.stringify({
       endpoint_id: endpointId,
-      type: "demo.order.paid",
+      type: resolvedPayload.type,
       data: {
         run_id: runId,
         scenario: scenarioId,
         purpose: "reliability-story",
-        order_id: payload.order_id,
-        amount_cents: payload.amount_cents,
-        note: payload.note,
+        ...businessData,
       },
     }),
   });

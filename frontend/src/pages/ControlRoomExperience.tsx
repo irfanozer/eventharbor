@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import {
   ensureReceiverLabEndpoint,
@@ -22,13 +22,31 @@ import {
   demoScenario,
   isDemoScenarioId,
 } from "../demoScenarios";
+import {
+  DEFAULT_DEMO_EVENT_TYPE,
+  DEMO_EVENT_TYPES,
+  RECEIVER_LAB_BASE_URL,
+  demoEventDefinition,
+  demoEventPayload,
+  demoEventReference,
+  initialDemoEventValues,
+  isCanonicalDemoEndpoint,
+  isDemoEventTypeId,
+  isExpectedSchemaRejection,
+} from "../demoEvents";
 import { shortId } from "../format";
 import {
   runReliabilityTour,
   type ReliabilityTourProgress,
   type ReliabilityTourResult,
 } from "../reliabilityTour";
-import type { Delivery, DemoEventPayload, DemoScenarioId, EventAccepted } from "../types";
+import type {
+  Delivery,
+  DemoEventPayload,
+  DemoEventTypeId,
+  DemoScenarioId,
+  EventAccepted,
+} from "../types";
 
 const STORY_EVENT_KEY = "eventharbor.control-room.event-id";
 const STORY_TOUR_KEY = "eventharbor.control-room.tour";
@@ -46,34 +64,66 @@ interface TourStart {
 }
 
 interface EventDraft {
-  orderId: string;
-  amount: string;
-  note: string;
+  type: DemoEventTypeId;
+  values: Record<string, string>;
 }
 
 function draftFromPayload(payload: DemoEventPayload): EventDraft {
+  const definition = demoEventDefinition(payload.type);
   return {
-    orderId: payload.order_id,
-    amount: (payload.amount_cents / 100).toFixed(2),
-    note: payload.note,
+    type: payload.type,
+    values: Object.fromEntries(definition.fields.map((field) => {
+      const value = payload.data[field.key];
+      if (field.kind === "money" && typeof value === "number") {
+        return [field.key, (value / 100).toFixed(2)];
+      }
+      return [field.key, value === undefined ? "" : String(value)];
+    })),
   };
 }
 
-function initialEventDraft(): EventDraft {
-  const suffix = crypto.randomUUID().slice(0, 8).toUpperCase();
-  return {
-    orderId: `ORDER-${suffix}`,
-    amount: "129.00",
-    note: "Paid order ready for fulfillment",
-  };
+function initialEventDraft(type: DemoEventTypeId = DEFAULT_DEMO_EVENT_TYPE): EventDraft {
+  return { type, values: initialDemoEventValues(type) };
 }
 
 function payloadFromDraft(draft: EventDraft): DemoEventPayload {
-  return {
-    order_id: draft.orderId.trim(),
-    amount_cents: Math.round(Number.parseFloat(draft.amount) * 100),
-    note: draft.note.trim(),
-  };
+  return demoEventPayload(draft.type, draft.values);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function storedPayload(value: unknown): DemoEventPayload | null {
+  if (isRecord(value) && isDemoEventTypeId(value.type) && isRecord(value.data)) {
+    const validValues = Object.values(value.data).every(
+      (item) => typeof item === "string" || typeof item === "number",
+    );
+    if (validValues) {
+      return {
+        type: value.type,
+        data: value.data as Record<string, string | number>,
+      };
+    }
+  }
+
+  // Migrate a session created by the earlier single-order composer.
+  if (
+    isRecord(value) &&
+    typeof value.order_id === "string" &&
+    typeof value.amount_cents === "number"
+  ) {
+    return {
+      type: DEFAULT_DEMO_EVENT_TYPE,
+      data: {
+        order_id: value.order_id,
+        customer_id: "CUS-MIGRATED",
+        amount_cents: value.amount_cents,
+        currency: "USD",
+      },
+    };
+  }
+  return null;
 }
 
 function storedTourStart(): TourStart | null {
@@ -81,16 +131,16 @@ function storedTourStart(): TourStart | null {
     const raw = sessionStorage.getItem(STORY_TOUR_KEY);
     if (!raw) return null;
     const value = JSON.parse(raw) as Partial<TourStart>;
+    const payload = storedPayload(value.payload);
     if (
       typeof value.runId !== "string" ||
-      typeof value.payload?.order_id !== "string" ||
-      typeof value.payload.amount_cents !== "number" ||
-      typeof value.payload.note !== "string" ||
+      payload === null ||
       (value.eventId !== undefined && typeof value.eventId !== "string") ||
       (value.replayDeliveryId !== undefined && typeof value.replayDeliveryId !== "string")
     ) return null;
     return {
       ...value,
+      payload,
       scenarioId: isDemoScenarioId(value.scenarioId)
         ? value.scenarioId
         : DEFAULT_DEMO_SCENARIO_ID,
@@ -174,23 +224,40 @@ function waitWithAbort(durationMs: number, signal?: AbortSignal): Promise<void> 
 }
 
 export function ControlRoomExperience() {
-  const initialTour = storedTourStart();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const requestedEventType = searchParams.get("event_type");
+  const startFreshEvent = searchParams.get("new_event") === "1";
+  const initialEventType = isDemoEventTypeId(requestedEventType)
+    ? requestedEventType
+    : DEFAULT_DEMO_EVENT_TYPE;
+  const initialTour = startFreshEvent ? null : storedTourStart();
   const queryClient = useQueryClient();
   const tourAbort = useRef<AbortController | null>(null);
-  const [mode, setMode] = useState<DemoMode>(() => storedStoryMode() ?? "guided");
-  const [storyMode, setStoryMode] = useState<DemoMode | null>(() => storedStoryMode());
+  const [mode, setMode] = useState<DemoMode>(() => startFreshEvent ? "guided" : storedStoryMode() ?? "guided");
+  const [storyMode, setStoryMode] = useState<DemoMode | null>(() => startFreshEvent ? null : storedStoryMode());
   const [draftScenarioId, setDraftScenarioId] = useState<DemoScenarioId>(
     () => initialTour?.scenarioId ?? DEFAULT_DEMO_SCENARIO_ID,
   );
   const [restoredTour, setRestoredTour] = useState<TourStart | null>(initialTour);
   const [eventDraft, setEventDraft] = useState<EventDraft>(
-    () => initialTour ? draftFromPayload(initialTour.payload) : initialEventDraft(),
+    () => initialTour ? draftFromPayload(initialTour.payload) : initialEventDraft(initialEventType),
   );
-  const [storyEventId, setStoryEventId] = useState<string | null>(() => storedStoryEvent());
+  const [storyEventId, setStoryEventId] = useState<string | null>(() => startFreshEvent ? null : storedStoryEvent());
   const [tourProgress, setTourProgress] = useState<ReliabilityTourProgress | null>(null);
   const [replayOpen, setReplayOpen] = useState(false);
   const [preparingNext, setPreparingNext] = useState(false);
   const draftScenario = demoScenario(draftScenarioId);
+  const draftDefinition = demoEventDefinition(eventDraft.type);
+
+  useEffect(() => {
+    if (!startFreshEvent) return;
+    rememberTourStart(null);
+    rememberStoryEvent(null);
+    rememberStoryMode(null);
+    const consumedParams = new URLSearchParams(searchParams);
+    consumedParams.delete("new_event");
+    setSearchParams(consumedParams, { replace: true });
+  }, [searchParams, setSearchParams, startFreshEvent]);
 
   const story = useQuery({
     queryKey: ["event", storyEventId],
@@ -244,10 +311,21 @@ export function ControlRoomExperience() {
     refetchInterval: replayGeneration && !["dead_lettered", "delivered"].includes(replayGeneration.status) ? 450 : false,
   });
 
-  const storyComplete = Boolean(
-    currentDelivery?.status === "delivered" ||
-    (activeScenario.strategy === "terminal" && currentDelivery?.status === "dead_lettered"),
+  const terminalSchemaVerified = Boolean(
+    activeScenario.strategy === "terminal" &&
+    isExpectedSchemaRejection(
+      story.data?.type,
+      sourceDelivery,
+      sourceAttempts.data?.attempts ?? [],
+    ),
   );
+  const terminalEvidenceNeedsReview = Boolean(
+    activeScenario.strategy === "terminal" &&
+    sourceDelivery?.status === "dead_lettered" &&
+    !sourceAttempts.isPending &&
+    !terminalSchemaVerified,
+  );
+  const storyComplete = Boolean(currentDelivery?.status === "delivered" || terminalSchemaVerified);
   const storyDeadLettered = currentDelivery?.status === "dead_lettered";
   const receiverReady = receiver.data?.preset === "success";
 
@@ -263,6 +341,7 @@ export function ControlRoomExperience() {
           ensureReceiverLabEndpoint,
           publishDemoEvent,
           getEvent,
+          getDeliveryAttempts,
           replayDelivery,
           wait: waitWithAbort,
           now: Date.now,
@@ -322,7 +401,7 @@ export function ControlRoomExperience() {
     mutationFn: async (start) => {
       const scenario = demoScenario(start.scenarioId);
       await setReceiverLabPreset(scenario.preset, start.runId);
-      const endpoint = await ensureReceiverLabEndpoint();
+      const endpoint = await ensureReceiverLabEndpoint(start.payload.type);
       return publishDemoEvent(
         endpoint.id,
         start.runId,
@@ -344,7 +423,7 @@ export function ControlRoomExperience() {
     },
   });
 
-  const repairReceiver = useMutation({
+  const restoreReceiverHealth = useMutation({
     mutationFn: async () => {
       const receiverState = await getReceiverLab(activeRunId);
       return receiverState.preset === "success"
@@ -387,7 +466,7 @@ export function ControlRoomExperience() {
     setPreparingNext(false);
     guidedTour.reset();
     runOperatorStory.reset();
-    repairReceiver.reset();
+    restoreReceiverHealth.reset();
     approveReplay.reset();
   }
 
@@ -445,7 +524,7 @@ export function ControlRoomExperience() {
     const currentIndex = DEMO_SCENARIOS.findIndex((scenario) => scenario.id === activeScenario.id);
     const nextScenario = DEMO_SCENARIOS[(currentIndex + 1) % DEMO_SCENARIOS.length];
     if (nextScenario) setDraftScenarioId(nextScenario.id);
-    setEventDraft(initialEventDraft());
+    setEventDraft(initialEventDraft(eventDraft.type));
     setPreparingNext(true);
     window.requestAnimationFrame(() => {
       document.getElementById("demo-input")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -460,6 +539,7 @@ export function ControlRoomExperience() {
     (
       replayGeneration ||
       receiverReady ||
+      tourProgress?.phase === "repairing" ||
       currentReceiverObservations.some((observation) => observation.response_status_code === 200)
     ),
   );
@@ -470,10 +550,23 @@ export function ControlRoomExperience() {
       : receiver.isError
         ? "unavailable"
         : "ready";
-  const amount = Number.parseFloat(eventDraft.amount);
-  const eventDraftValid = eventDraft.orderId.trim().length > 0 &&
-    eventDraft.note.trim().length > 0 &&
-    Number.isFinite(amount) && amount > 0;
+  const eventDraftValid = draftDefinition.fields.every((field) => {
+    if (
+      draftScenario.strategy === "terminal" &&
+      field.key === draftDefinition.invalidField
+    ) return true;
+    const value = eventDraft.values[field.key] ?? "";
+    if (field.kind === "money") {
+      const amount = Number.parseFloat(value);
+      return Number.isFinite(amount) && amount > 0;
+    }
+    if (field.kind === "integer") {
+      const number = Number(value);
+      return Number.isInteger(number) && number > 0;
+    }
+    if (field.key === "currency") return value.trim().length === 3;
+    return value.trim().length > 0;
+  });
   const restoredCanResume = Boolean(
     restoredTour &&
     !guidedTour.isPending &&
@@ -497,15 +590,26 @@ export function ControlRoomExperience() {
     (storyEventId && !story.data),
   );
   const activeMode = storyMode ?? mode;
-  const runFailed = guidedFailed || guidedTour.isError || runOperatorStory.isError;
+  const runFailed = guidedFailed || guidedTour.isError || runOperatorStory.isError || terminalEvidenceNeedsReview;
   const formLocked = journeyStarted && !storyComplete && !preparingNext && !runFailed;
-  const activeOrderId = typeof story.data?.data.order_id === "string"
-    ? story.data.data.order_id
-    : restoredTour?.payload.order_id ?? "Accepting order…";
-  const activeAmountCents = typeof story.data?.data.amount_cents === "number"
-    ? story.data.data.amount_cents
-    : restoredTour?.payload.amount_cents;
-  const activeAmount = activeAmountCents === undefined ? "—" : (activeAmountCents / 100).toFixed(2);
+  const activeEventType = isDemoEventTypeId(story.data?.type)
+    ? story.data.type
+    : restoredTour?.payload.type ?? eventDraft.type;
+  const activeDefinition = demoEventDefinition(activeEventType);
+  const activePayload: DemoEventPayload = {
+    type: activeEventType,
+    data: story.data?.data as Record<string, string | number> ?? restoredTour?.payload.data ?? {},
+  };
+  const activeReference = story.data || restoredTour
+    ? demoEventReference(activePayload)
+    : "Accepting event…";
+  const visibleEndpointName = endpointEvidence.data
+    ? isCanonicalDemoEndpoint(endpointEvidence.data.url)
+      ? endpointEvidence.data.name
+      : endpointEvidence.data.url === RECEIVER_LAB_BASE_URL
+        ? "Receiver Lab · legacy generic route"
+        : endpointEvidence.data.name
+    : activeDefinition.destinationName;
   const journeyActionMessage = storyComplete
     ? "This completed event stays on screen while you prepare the next failure scenario above."
     : activeMessage;
@@ -517,10 +621,10 @@ export function ControlRoomExperience() {
           <p className="eyebrow">Live webhook journey · real API, database, and HTTP</p>
           <h1>Watch EventHarbor save, retry, and recover one webhook.</h1>
           <p className="lede">
-            Send an order from this browser. EventHarbor stores it in PostgreSQL before a background worker
-            sends it to a separate Receiver Lab service. The receiver&apos;s actual HTTP responses drive the result.
+            Choose a business event and a real Receiver Lab route. EventHarbor stores it in PostgreSQL before
+            a background worker sends the webhook. The receiver&apos;s actual HTTP response drives every status you see.
           </p>
-          <div className="plain-flow" aria-label="The order moves from this browser through EventHarbor to Receiver Lab">
+          <div className="plain-flow" aria-label="The event moves from this browser through EventHarbor to Receiver Lab">
             <span>Browser UI</span><i aria-hidden="true">→</i><strong>Store + deliver</strong><i aria-hidden="true">→</i><span>Receiver Lab</span>
           </div>
           <ul className="hero-trust-strip" aria-label="Live demonstration guarantees">
@@ -540,17 +644,17 @@ export function ControlRoomExperience() {
         >
           <div className="composer-topline">
             <span className="section-index">1 / Choose how the receiver behaves</span>
-            <div className="demo-mode-control demo-mode-control--compact" role="group" aria-label="Demo mode">
-              <button type="button" disabled={formLocked} aria-label="Guided run: automatically demonstrate failure and recovery" aria-pressed={mode === "guided"} onClick={() => setMode("guided")}>Guided</button>
-              <button type="button" disabled={formLocked} aria-label="Manual controls: you trigger receiver restoration and replay" aria-pressed={mode === "operator"} onClick={() => setMode("operator")}>Manual</button>
+            <div className="composer-mode-switch" role="group" aria-label="Demo mode">
+              <button type="button" disabled={formLocked} aria-label="Guided run: automatically demonstrate failure and recovery" aria-pressed={mode === "guided"} onClick={() => setMode("guided")}>Guided run</button>
+              <button type="button" disabled={formLocked} aria-label="Manual controls: you restore receiver health and approve replay" aria-pressed={mode === "operator"} onClick={() => setMode("operator")}>Manual</button>
             </div>
           </div>
-          <h2 id="event-composer-title">Choose the failure. Then send the order.</h2>
+          <h2 id="event-composer-title">Choose the failure. Then send the event.</h2>
 
           {journeyStarted ? (
             <div className="composer-current-story" data-complete={storyComplete}>
-              <span>{storyComplete ? "Completed story preserved below" : runFailed ? "Previous attempt preserved below" : "Current story running below"}</span>
-              <strong>{activeOrderId}</strong>
+              <span>{runFailed ? "Previous attempt preserved below" : storyComplete ? "Completed story preserved below" : "Current story running below"}</span>
+              <strong>{activeReference}</strong>
               <small>{storyComplete || runFailed ? "You can prepare the next event without removing this result." : "Finish or pause this event before replacing it."}</small>
             </div>
           ) : null}
@@ -571,32 +675,105 @@ export function ControlRoomExperience() {
             ))}
           </div>
 
-          <fieldset disabled={formLocked}>
-            <label className="event-composer__type"><span>Event type</span><code>demo.order.paid</code></label>
-            <label><span>Order ID</span><input value={eventDraft.orderId} maxLength={80} onChange={(event) => setEventDraft((current) => ({ ...current, orderId: event.target.value }))} /></label>
-            <label><span>Amount</span><span className="event-composer__money"><i aria-hidden="true">$</i><input type="number" min="0.01" step="0.01" value={eventDraft.amount} onChange={(event) => setEventDraft((current) => ({ ...current, amount: event.target.value }))} /></span></label>
-            <label className="event-composer__note"><span>Note</span><textarea value={eventDraft.note} maxLength={160} rows={2} onChange={(event) => setEventDraft((current) => ({ ...current, note: event.target.value }))} /></label>
+          <fieldset className="event-composer__payload" disabled={formLocked}>
+            <label className="event-composer__type">
+              <span>Business event type</span>
+              <select
+                value={eventDraft.type}
+                onChange={(event) => {
+                  const nextType = event.target.value;
+                  if (isDemoEventTypeId(nextType)) setEventDraft(initialEventDraft(nextType));
+                }}
+              >
+                {DEMO_EVENT_TYPES.map((definition) => (
+                  <option key={definition.type} value={definition.type}>{definition.type} · {definition.label}</option>
+                ))}
+              </select>
+              <small>{draftDefinition.description}</small>
+            </label>
+
+            <div className="event-composer__destination">
+              <span>Real destination selected by this event type</span>
+              <strong>{draftDefinition.destinationName}</strong>
+              <code>{draftDefinition.destinationUrl}</code>
+              <small>{draftDefinition.destinationPurpose} These are distinct routes in one separate FastAPI service.</small>
+            </div>
+
+            <div className="event-composer__fields">
+              {draftDefinition.fields.map((field) => {
+                const omitted = draftScenario.strategy === "terminal" && field.key === draftDefinition.invalidField;
+                if (omitted) {
+                  return (
+                    <div className="event-field-omitted" key={field.key}>
+                      <span>{field.label}</span>
+                      <strong>Intentionally omitted from the JSON body</strong>
+                      <code>data.{field.key}</code>
+                      <small>{draftDefinition.receiverRequirement}</small>
+                    </div>
+                  );
+                }
+                const value = eventDraft.values[field.key] ?? "";
+                const update = (nextValue: string) => setEventDraft((current) => ({
+                  ...current,
+                  values: { ...current.values, [field.key]: nextValue },
+                }));
+                return (
+                  <label key={field.key}>
+                    <span>{field.label}</span>
+                    {field.kind === "money" ? (
+                      <span className="event-composer__money">
+                        <i aria-hidden="true">$</i>
+                        <input type="number" min="0.01" step="0.01" value={value} onChange={(event) => update(event.target.value)} />
+                      </span>
+                    ) : (
+                      <input
+                        type={field.kind === "integer" ? "number" : "text"}
+                        min={field.kind === "integer" ? 1 : undefined}
+                        step={field.kind === "integer" ? 1 : undefined}
+                        maxLength={field.kind === "text" ? 80 : undefined}
+                        value={value}
+                        onChange={(event) => update(event.target.value)}
+                      />
+                    )}
+                    <small>{field.help}</small>
+                  </label>
+                );
+              })}
+            </div>
           </fieldset>
 
-          <div className="receiver-contract">
-            <span>What will happen in Receiver Lab</span>
-            <strong>{draftScenario.contract}</strong>
-            <p><b>Concrete cause</b>{draftScenario.cause}</p>
+          <div className="receiver-contract" data-terminal={draftScenario.strategy === "terminal"}>
+            <span>{draftScenario.strategy === "terminal" ? "Why this request will be rejected" : "What the real receiver will do"}</span>
+            {draftScenario.strategy === "terminal" ? (
+              <>
+                <strong>The browser sends <code>{eventDraft.type}</code> without <code>data.{draftDefinition.invalidField}</code>.</strong>
+                <ol className="receiver-decision-list">
+                  <li><b>EventHarbor intake · HTTP 202</b><small>The event envelope is valid, so it is stored durably before delivery.</small></li>
+                  <li><b>Receiver Lab · HTTP 400</b><small>Its {eventDraft.type} contract requires {draftDefinition.invalidField}. Retrying the unchanged body cannot fix it.</small></li>
+                </ol>
+              </>
+            ) : (
+              <><strong>{draftScenario.contract}</strong><p><b>Concrete cause</b>{draftScenario.cause}</p></>
+            )}
             <small>{draftScenario.takeaway}</small>
           </div>
           <button className="story-action" type="submit" disabled={formLocked || !eventDraftValid}>
-            <span>{formLocked ? "Current event is still running" : journeyStarted ? "Send this next event" : "Send this event and watch it move"}</span><span aria-hidden="true">→</span>
+            <span>{formLocked
+              ? "Current event is still running"
+              : draftScenario.strategy === "terminal"
+                ? `Send without ${draftDefinition.invalidField}`
+                : journeyStarted ? "Send this next event" : "Send this event and watch it move"}</span><span aria-hidden="true">→</span>
           </button>
-          <small>Synthetic order data. Real API transaction, database state, worker requests, responses, and receiver receipts.</small>
+          <small>Synthetic business data. Real API transaction, PostgreSQL state, worker requests, HTTP responses, and receiver receipts.</small>
         </form>
       </section>
 
       {journeyStarted ? (
         <section className="active-run-banner" aria-label="Active demonstration">
-          <div><p className="eyebrow">Following this order</p><h1>{activeOrderId}</h1></div>
+          <div><p className="eyebrow">Following this event</p><h1>{activeReference}</h1></div>
           <dl>
-            <div><dt>Receiver behavior</dt><dd>{activeScenario.label}</dd></div>
-            <div><dt>Order amount</dt><dd>${activeAmount}</dd></div>
+            <div><dt>Event type</dt><dd><code>{activeEventType}</code></dd></div>
+            <div><dt>Destination</dt><dd>{visibleEndpointName}</dd></div>
             <div><dt>Event</dt><dd><code>{storyEventId ? shortId(storyEventId) : "Accepting…"}</code></dd></div>
           </dl>
         </section>
@@ -610,8 +787,8 @@ export function ControlRoomExperience() {
         isStarting={journeyLoading}
         runId={activeRunId}
         event={story.data ?? null}
-        endpointName={endpointEvidence.data?.name ?? "Receiver Lab"}
-        endpointUrl={endpointEvidence.data?.url ?? "http://receiver-lab:8100/webhooks"}
+        endpointName={visibleEndpointName}
+        endpointUrl={endpointEvidence.data?.url ?? activeDefinition.destinationUrl}
         originalDelivery={sourceDelivery ?? null}
         replayDelivery={replayGeneration ?? null}
         originalAttempts={sourceAttempts.data?.attempts ?? []}
@@ -639,21 +816,21 @@ export function ControlRoomExperience() {
                 {storyDeadLettered && activeScenario.strategy === "replay" && !receiverReady ? (
                   <>
                     <div className="recovery-action-explainer">
-                      <span>What this control changes</span>
-                      <strong>Only this Receiver Lab run: HTTP 503 → HTTP 200</strong>
-                      <p>This is controlled fault injection, like the destination recovering after a restart or fixed deployment. It does not change EventHarbor, erase the failures, or resend the webhook.</p>
+                      <span>Restore the destination&apos;s health</span>
+                      <strong>Only this test receiver changes: HTTP 503 unavailable → HTTP 200 accepting</strong>
+                      <p>The service is reachable but currently unavailable. This simulates it becoming healthy after a restart or deployment. EventHarbor has already made four automatic attempts and saved every failure; this control does not erase or resend anything.</p>
                     </div>
-                    <button className="story-action story-action-repair" type="button" disabled={repairReceiver.isPending} onClick={() => repairReceiver.mutate()}><span>{repairReceiver.isPending ? "Changing the next response to HTTP 200…" : "Switch this test receiver to HTTP 200"}</span><span aria-hidden="true">→</span></button>
+                    <button className="story-action story-action-repair" type="button" disabled={restoreReceiverHealth.isPending} onClick={() => restoreReceiverHealth.mutate()}><span>{restoreReceiverHealth.isPending ? "Restoring test receiver health…" : "Restore test receiver health"}</span><span aria-hidden="true">→</span></button>
                   </>
                 ) : null}
                 {storyDeadLettered && activeScenario.strategy === "replay" && receiverReady && sourceDelivery && !replayGeneration ? (
                   <>
                     <div className="recovery-action-explainer" data-restored="true">
-                      <span>Test receiver restored</span>
-                      <strong>Receiver Lab now returns HTTP 200 for this run.</strong>
-                      <p>The original delivery is still stopped and preserved. Nothing is resent until you create the separate replay below.</p>
+                      <span>Receiver healthy · ready for HTTP 200</span>
+                      <strong>The original event is still stopped, saved, and unchanged.</strong>
+                      <p>EventHarbor does not continue indefinitely after the retry budget. Operator approval controls when the stopped, preserved event is sent again and makes the recovery deliberate and traceable.</p>
                     </div>
-                    <button className="story-action" type="button" onClick={() => setReplayOpen(true)}><span>Review and create a separate replay</span><span aria-hidden="true">→</span></button>
+                    <button className="story-action" type="button" onClick={() => setReplayOpen(true)}><span>Replay the preserved event with EventHarbor</span><span aria-hidden="true">→</span></button>
                   </>
                 ) : null}
                 {storyComplete ? <button className="story-action story-action-complete" type="button" onClick={prepareAnother}><span>Set up another failure scenario</span><span aria-hidden="true">↗</span></button> : null}
@@ -661,7 +838,7 @@ export function ControlRoomExperience() {
             )}
             {guidedTour.isError ? <ErrorState error={guidedTour.error} /> : null}
             {runOperatorStory.isError ? <ErrorState error={runOperatorStory.error} /> : null}
-            {repairReceiver.isError ? <ErrorState error={repairReceiver.error} /> : null}
+            {restoreReceiverHealth.isError ? <ErrorState error={restoreReceiverHealth.error} /> : null}
             {approveReplay.isError ? <ErrorState error={approveReplay.error} /> : null}
             {story.isError && storyEventId ? <ErrorState error={story.error} retry={() => void story.refetch()} /> : null}
           </>

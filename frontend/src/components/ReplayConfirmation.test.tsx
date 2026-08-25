@@ -19,7 +19,7 @@ describe("ReplayConfirmation", () => {
 
     expect(screen.getByRole("alertdialog")).toHaveAttribute("aria-modal", "true");
     expect(screen.getByText("This sends the webhook again.")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: /approve replay/i }));
+    fireEvent.click(screen.getByRole("button", { name: /approve and replay/i }));
     expect(confirm).toHaveBeenCalledOnce();
     expect(cancel).not.toHaveBeenCalled();
   });
@@ -40,4 +40,3 @@ describe("ReplayConfirmation", () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 });
-

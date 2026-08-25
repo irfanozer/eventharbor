@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
-from typing import Annotated
+from typing import Annotated, TypedDict
 
 from fastapi import FastAPI, Header, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -18,6 +18,36 @@ from eventharbor.demo_runs import DEMO_RUN_ID_MAX_LENGTH, DEMO_RUN_ID_PATTERN
 MAX_SCOPED_RUNS = 100
 MAX_REQUESTS_PER_RUN = 100
 CONTROL_REQUEST_LIMIT = 20
+
+class ReceiverContract(TypedDict):
+    route: str
+    required_text: tuple[str, ...]
+    required_positive_integer: tuple[str, ...]
+
+
+RECEIVER_CONTRACTS: dict[str, ReceiverContract] = {
+    "order.paid": {
+        "route": "orders",
+        "required_text": ("order_id", "customer_id", "currency"),
+        "required_positive_integer": ("amount_cents",),
+    },
+    # Retained with its original contract so older stopped events remain replayable.
+    "demo.order.paid": {
+        "route": "orders",
+        "required_text": ("order_id",),
+        "required_positive_integer": (),
+    },
+    "shipment.dispatched": {
+        "route": "shipping",
+        "required_text": ("shipment_id", "order_id", "carrier", "tracking_number"),
+        "required_positive_integer": (),
+    },
+    "inventory.threshold_reached": {
+        "route": "inventory",
+        "required_text": ("sku", "warehouse_id"),
+        "required_positive_integer": ("quantity_remaining", "reorder_threshold"),
+    },
+}
 
 
 class ReceiverMode(StrEnum):
@@ -142,8 +172,13 @@ async def list_requests(
         return {"count": len(run.requests), "requests": list(run.requests)}
 
 
-def _payload_validation_error(body: bytes) -> tuple[str, str] | None:
-    """Return the concrete Receiver Lab schema violation, if any."""
+def _payload_validation_error(
+    body: bytes,
+    receiver_channel: str | None,
+    *,
+    validate_unknown: bool,
+) -> tuple[str, str] | None:
+    """Validate a known business event against the receiver route it selected."""
 
     try:
         payload = json.loads(body)
@@ -151,12 +186,42 @@ def _payload_validation_error(body: bytes) -> tuple[str, str] | None:
         return "invalid_json", "The webhook body must be valid JSON."
     if not isinstance(payload, dict):
         return "invalid_payload", "The webhook body must be a JSON object."
+    event_type = payload.get("type")
+    contract = RECEIVER_CONTRACTS.get(event_type) if isinstance(event_type, str) else None
+    if contract is None:
+        if validate_unknown:
+            return "unsupported_event_type", "type must name a Receiver Lab event contract."
+        return None
+
+    expected_route = contract["route"]
+    if receiver_channel is not None and receiver_channel != expected_route:
+        return (
+            "wrong_receiver_route",
+            f"{event_type} must be sent to /webhooks/{expected_route}.",
+        )
+
     data = payload.get("data")
     if not isinstance(data, dict):
         return "invalid_data", "data must be a JSON object."
-    customer_id = data.get("customer_id")
-    if not isinstance(customer_id, str) or not customer_id.strip():
-        return "missing_customer_id", "data.customer_id is required."
+
+    for field_name in contract["required_text"]:
+        value = data.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            return f"missing_{field_name}", f"data.{field_name} is required."
+
+    for field_name in contract["required_positive_integer"]:
+        value = data.get(field_name)
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            return (
+                f"invalid_{field_name}",
+                f"data.{field_name} must be a positive integer.",
+            )
+
+    if event_type == "order.paid":
+        currency = data.get("currency")
+        if not isinstance(currency, str) or len(currency.strip()) != 3:
+            return "invalid_currency", "data.currency must be a three-letter code."
+
     return None
 
 
@@ -174,8 +239,10 @@ def _response_evidence(
 
 
 @app.post("/webhooks", tags=["receiver lab"])
+@app.post("/webhooks/{receiver_channel}", tags=["receiver lab"])
 async def receive_webhook(
     request: Request,
+    receiver_channel: str | None = None,
     event_id: Annotated[str | None, Header(alias="X-EventHarbor-Event-Id")] = None,
     delivery_id: Annotated[str | None, Header(alias="X-EventHarbor-Delivery-Id")] = None,
     event_type: Annotated[str | None, Header(alias="X-EventHarbor-Event-Type")] = None,
@@ -205,7 +272,18 @@ async def receive_webhook(
         sequence = run.sequence
         configuration = run.configuration
 
-        if configuration.mode == ReceiverMode.RATE_LIMITED:
+        validation_error = _payload_validation_error(
+            body,
+            receiver_channel,
+            validate_unknown=(
+                receiver_channel is not None
+                or configuration.mode == ReceiverMode.PERMANENT_FAILURE
+            ),
+        )
+
+        if validation_error is not None:
+            response_status_code = status.HTTP_400_BAD_REQUEST
+        elif configuration.mode == ReceiverMode.RATE_LIMITED:
             # A zero failure count preserves the sustained-rate-limit test mode.
             # A positive count creates a realistic, bounded 429 -> recovery story.
             rate_limit_active = (
@@ -215,13 +293,6 @@ async def receive_webhook(
             response_status_code = (
                 status.HTTP_429_TOO_MANY_REQUESTS
                 if rate_limit_active
-                else status.HTTP_200_OK
-            )
-        elif configuration.mode == ReceiverMode.PERMANENT_FAILURE:
-            validation_error = _payload_validation_error(body)
-            response_status_code = (
-                status.HTTP_400_BAD_REQUEST
-                if validation_error is not None
                 else status.HTTP_200_OK
             )
         elif (
@@ -244,6 +315,7 @@ async def receive_webhook(
                 "event_id": event_id,
                 "delivery_id": delivery_id,
                 "event_type": event_type,
+                "receiver_route": receiver_channel or "legacy-generic",
                 "delivery_attempt": delivery_attempt,
                 "request_timestamp": request_timestamp,
                 "received_at": received_at,

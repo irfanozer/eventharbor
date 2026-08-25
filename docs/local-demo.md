@@ -1,7 +1,7 @@
 # Local EventHarbor demo
 
 This walkthrough proves both the normal path and the complete
-failure-repair-replay path:
+failure-recovery-replay path:
 
 ```text
 publisher -> FastAPI -> PostgreSQL -> worker -> Receiver Lab
@@ -29,9 +29,12 @@ If port `3000` is in use, set `FRONTEND_PORT=3001` in `.env` and open
 
 ## 2. Run the recruiter-first event journey
 
-Open <http://localhost:3000>. Choose one Receiver Lab incident, edit the example
-order ID, amount, or note if you want, then choose **Send this event and watch it
-move**.
+Open <http://localhost:3000>. Choose one Receiver Lab incident and one of three
+business-event contracts: `order.paid`, `shipment.dispatched`, or
+`inventory.threshold_reached`. Edit the visible fields, then choose **Send this
+event and watch it move**. Each type selects a distinct route in the separate
+Receiver Lab service: `/webhooks/orders`, `/webhooks/shipping`, or
+`/webhooks/inventory`.
 
 The page collapses the input form and keeps the same event inside one live panel.
 Read the large **NOW** status first, then follow the highlighted fixed route:
@@ -46,13 +49,14 @@ duration, and independent Receiver Lab receipt visually dominant.
 
 Available incidents are:
 
-- **Destination outage:** `503, 503, 503, 503`, stop, repair, then generation 1
-  receives `200`.
-- **Brief service outage:** `503, 503, 200`; generation 0 recovers automatically.
+- **Destination outage:** `503, 503, 503, 503`, stop and save, restore the test
+  receiver's health, then approve one replay that receives `200`.
+- **Brief service outage:** `503, 503, 200`; the original delivery recovers automatically.
 - **API rate limit:** `429, 429, 200`; the first two responses include
   `Retry-After: 2` and the worker waits accordingly.
-- **Invalid request:** one `400`; the worker classifies it as permanent and does
-  not make pointless retries.
+- **Invalid request:** the composer visibly omits one contract field. A healthy
+  Receiver Lab returns one exact `400` missing-field response; the worker
+  classifies it as permanent and does not make pointless retries.
 
 The default destination-outage choice starts the complete recovery presentation.
 The order is synthetic, but the
@@ -64,26 +68,26 @@ Lab endpoint, selects the deterministic dead-letter
 preset, and publishes a synthetic event with a unique idempotency key. These are
 real FastAPI calls that create PostgreSQL records. The worker then makes four
 real HTTP requests to Receiver Lab, and each receives `503`. The fourth failed
-attempt moves generation 0 to `dead_lettered` under the accelerated local retry
-policy.
+attempt moves the original delivery to `dead_lettered` under the accelerated
+local retry policy.
 
 After the terminal state is visible through the query API, the guided demo acts
-as the presentation operator: it explicitly repairs Receiver Lab to return HTTP
-`200`, then explicitly approves an idempotent replay. The replay API appends
-generation 1; the worker sends it as a separate HTTP request and persists the
-`200` result as `delivered`.
+as the presentation operator: it explicitly restores Receiver Lab's response
+mode to HTTP `200`, then calls the idempotent replay API. That API appends a
+separate recovery delivery; the worker sends it as a new HTTP request and
+persists the `200` result as `delivered`.
 
 The final timeline must retain both sides of the proof:
 
-- Generation 0 remains `dead_lettered` with four completed HTTP `503` attempts.
-- Generation 1 is `delivered` with its own HTTP `200` attempt.
+- The original delivery remains `dead_lettered` with four completed HTTP `503` attempts.
+- The recovery replay is `delivered` with its own HTTP `200` attempt.
 - The immutable event and original failure evidence were not reset, moved, or
   deleted during recovery.
 
 The live journey is the fastest recruiter walkthrough. Read it in this order:
 
 1. **Where it is now:** the dominant status and highlighted route node.
-2. **What happened so far:** the compact generation 0 and generation 1 chips.
+2. **What happened so far:** the compact original-delivery and recovery-replay rows.
 3. **What crossed the network:** the latest real HTTP exchange and receiver URL.
 4. **Why it is credible:** EventHarbor's attempt and Receiver Lab's
    independently captured receipt have matching event IDs, delivery IDs, attempt
@@ -96,22 +100,24 @@ verify the signature, and the interface does not claim that it does.
 
 The one-click sequence is presentation orchestration, not a production
 auto-replay policy. It waits for persisted terminal evidence and then issues the
-same distinct repair and explicit replay commands exposed to an operator.
+same distinct receiver-state and explicit replay commands exposed to an operator.
 
 ### Secondary operator mode
 
 Use operator mode when you want to control the recovery boundary yourself. The
 system performs the same real publish, delivery, retry, and dead-letter work but
-pauses at generation 0. Inspect the four `503` attempts, choose **Repair
-receiver**, review the replay action, and choose **Approve replay**. Repairing
-the receiver alone never changes the dead-lettered delivery; only the separate
-replay approval creates generation 1.
+pauses at the original delivery. Inspect the four `503` attempts, choose
+**Restore test receiver health**, review the safety warning, and choose
+**Approve and replay**. Restoring receiver health never changes or resends the
+stopped delivery; only the separate replay approval creates a recovery delivery.
 
 You can continue exploring through the top navigation:
 
 - **Events** lists recent events and their latest delivery state.
-- **Dead letters** contains only latest generations that still need action.
-- **Endpoints** shows safe Receiver Lab metadata without a signing secret.
+- **Stopped deliveries** defines the database term `dead_lettered` and contains
+  only latest deliveries that still need action.
+- **Endpoints** shows the three named Receiver Lab routes without a signing
+  secret. Older generic smoke-test registrations are grouped as historical data.
 
 The interface uses relative `/api` requests. Nginx proxies those requests to
 FastAPI inside Compose, so the browser only communicates with
@@ -121,7 +127,7 @@ FastAPI inside Compose, so the browser only communicates with
 
 Every browser run carries a safe run ID from its editable event payload to the
 worker and Receiver Lab. Receiver presets, counters, and receipts are stored per
-run, so concurrent visitors cannot repair or exhaust each other's scenario.
+run, so concurrent visitors cannot restore or exhaust each other's scenario.
 Receiver Lab bounds this in-memory demo state to 100 recently used runs and 100
 receipts per run; PostgreSQL event, delivery, and attempt records remain durable
 independently of that bounded presentation evidence.
@@ -262,120 +268,71 @@ and `request_fingerprint_sha256`, the separate value used for idempotency.
 Swagger is also available at <http://localhost:8000/docs> and
 <http://localhost:8100/docs>.
 
-### 5.5 Force a terminal failure
+### 5.5 Send data that the receiver contract rejects
 
-Change Receiver Lab to return a permanent HTTP `400` response. This optional
-API-only walkthrough takes a shorter terminal path so the commands remain
-compact; the browser's default destination-outage scenario uses four HTTP `503`
-attempts to demonstrate the retry policy before dead-lettering, while the
-permanent-rejection scenario exposes this same one-request classification visually.
+Keep Receiver Lab healthy. Register its named orders route, then deliberately
+omit `data.customer_id`, which that route requires:
 
 ```powershell
-$failingReceiver = @{
-  mode = "permanent_failure"
-  failures_before_success = 0
-  delay_ms = 0
+$ordersEndpointRequest = @{
+  name = "Orders receiver · Receiver Lab"
+  url = "http://receiver-lab:8100/webhooks/orders"
 } | ConvertTo-Json
 
-Invoke-RestMethod `
-  -Method Put `
-  -Uri "http://localhost:8100/control" `
+$ordersEndpoint = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://localhost:8000/v1/endpoints" `
   -ContentType "application/json" `
-  -Body $failingReceiver
+  -Body $ordersEndpointRequest
 
-$failedEventRequest = @{
-  endpoint_id = $endpoint.id
-  type = "demo.invoice.failed"
+$invalidOrderRequest = @{
+  endpoint_id = $ordersEndpoint.id
+  type = "order.paid"
   data = @{
-    invoice_id = "invoice-replay-1"
-    amount = 9900
+    order_id = "ORDER-INVALID-1"
+    amount_cents = 9900
+    currency = "USD"
   }
 } | ConvertTo-Json -Depth 5
 
-$failedEvent = Invoke-RestMethod `
+$invalidOrder = Invoke-RestMethod `
   -Method Post `
   -Uri "http://localhost:8000/v1/events" `
   -ContentType "application/json" `
-  -Headers @{ "Idempotency-Key" = "demo-invoice-replay-1" } `
-  -Body $failedEventRequest
+  -Headers @{ "Idempotency-Key" = "invalid-order-missing-customer-1" } `
+  -Body $invalidOrderRequest
 
 do {
   Start-Sleep -Milliseconds 250
-  $failedEventDetail = Invoke-RestMethod `
-    -Uri ("http://localhost:8000/v1/events/" + $failedEvent.event_id)
-  $sourceDelivery = $failedEventDetail.deliveries | `
-    Where-Object { $_.id -eq $failedEvent.delivery_id }
-} while ($sourceDelivery.status -ne "dead_lettered")
+  $invalidAttempts = Invoke-RestMethod `
+    -Uri ("http://localhost:8000/v1/deliveries/" + $invalidOrder.delivery_id + "/attempts")
+} while ($invalidAttempts.delivery.status -ne "dead_lettered")
 
-$sourceAttemptsBeforeReplay = Invoke-RestMethod `
-  -Uri ("http://localhost:8000/v1/deliveries/" + $failedEvent.delivery_id + "/attempts")
-
-$sourceAttemptsBeforeReplay | ConvertTo-Json -Depth 10
+$invalidAttempts | ConvertTo-Json -Depth 10
 ```
 
-The source delivery should now be `dead_lettered` with one completed,
-terminal-failure attempt containing HTTP `400`.
+The result is one real HTTP `400` attempt with disposition
+`terminal_failure` and response code `missing_customer_id`. The receiver was
+online; the actual JSON body caused the rejection.
 
-### 5.6 Repair the receiver and approve replay
+### 5.6 Prove that unchanged replay is blocked
 
-Repairing the destination does not mutate the dead-lettered delivery. The
-manual replay request creates generation 1 as a new pending delivery.
+The event body is immutable, so resending it cannot add the missing field.
+EventHarbor returns `409 payload_correction_required` instead of creating a
+misleading replay delivery:
 
 ```powershell
-$repairedReceiver = @{
-  mode = "success"
-  failures_before_success = 0
-  delay_ms = 0
-} | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Method Put `
-  -Uri "http://localhost:8100/control" `
-  -ContentType "application/json" `
-  -Body $repairedReceiver
-
-$replayHeaders = @{ "Idempotency-Key" = "repair-invoice-replay-1" }
-$replay = Invoke-RestMethod `
-  -Method Post `
-  -Uri ("http://localhost:8000/v1/deliveries/" + $failedEvent.delivery_id + "/replays") `
-  -Headers $replayHeaders
-
-# Sending the same approval again is safe and returns the same replay delivery.
-$sameReplay = Invoke-RestMethod `
-  -Method Post `
-  -Uri ("http://localhost:8000/v1/deliveries/" + $failedEvent.delivery_id + "/replays") `
-  -Headers $replayHeaders
-
-$replay
-$sameReplay
+try {
+  Invoke-RestMethod `
+    -Method Post `
+    -Uri ("http://localhost:8000/v1/deliveries/" + $invalidOrder.delivery_id + "/replays") `
+    -Headers @{ "Idempotency-Key" = "unsafe-invalid-order-replay-1" }
+} catch {
+  $_.ErrorDetails.Message
+}
 ```
 
-Both responses should contain the same `delivery_id` and
-`replay_generation: 1`.
-
-### 5.7 Prove the replay succeeded without erasing history
-
-```powershell
-do {
-  Start-Sleep -Milliseconds 250
-  $replayAttempts = Invoke-RestMethod `
-    -Uri ("http://localhost:8000/v1/deliveries/" + $replay.delivery_id + "/attempts")
-} while ($replayAttempts.delivery.status -ne "delivered")
-
-$sourceAttemptsAfterReplay = Invoke-RestMethod `
-  -Uri ("http://localhost:8000/v1/deliveries/" + $failedEvent.delivery_id + "/attempts")
-
-$completeHistory = Invoke-RestMethod `
-  -Uri ("http://localhost:8000/v1/events/" + $failedEvent.event_id)
-
-$replayAttempts | ConvertTo-Json -Depth 10
-$sourceAttemptsAfterReplay | ConvertTo-Json -Depth 10
-$completeHistory | ConvertTo-Json -Depth 10
-```
-
-The final evidence should show:
-
-- Generation 0 remains `dead_lettered` with its original HTTP `400` attempt.
-- Generation 1 is `delivered` with a separate HTTP `200` attempt.
-- Both deliveries reference the same immutable event and endpoint.
-- Repeating the replay request did not create generation 2.
+Publish a new corrected event with `customer_id` to demonstrate the successful
+path. Replay remains available for transient failures, such as the long `503`
+outage in the browser demo, after the destination is brought online and an
+operator explicitly approves recovery.

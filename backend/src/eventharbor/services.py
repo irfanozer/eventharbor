@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from uuid import UUID, uuid4
 
+from eventharbor.deliveries.retry import replay_block_code
 from eventharbor.deliveries.state_machine import DeliveryStatus
 from eventharbor.errors import DomainError
 from eventharbor.models import Delivery, DeliveryAttempt, Endpoint, Event
@@ -20,6 +21,7 @@ from eventharbor.schemas import EndpointCreateRequest, EventPublishRequest
 from eventharbor.serialization import CanonicalJSONError, canonical_json_bytes, canonical_sha256
 
 LOCAL_SOURCE = "local-api"
+RECEIVER_LAB_ROUTES = ("orders", "shipping", "inventory")
 
 
 def _new_signing_secret() -> str:
@@ -76,14 +78,19 @@ class EndpointService:
         self._secret_factory = secret_factory
 
     async def create(self, request: EndpointCreateRequest) -> CreatedEndpoint:
-        if request.url != self._receiver_lab_url:
+        receiver_base = self._receiver_lab_url.rstrip("/")
+        allowed_urls = {
+            receiver_base,
+            *(f"{receiver_base}/{route}" for route in RECEIVER_LAB_ROUTES),
+        }
+        if request.url.rstrip("/") not in allowed_urls:
             raise DomainError(
                 status_code=422,
                 code="receiver_url_not_allowed",
                 title="Endpoint URL is not allowed",
                 detail=(
-                    "This local milestone accepts only the configured Receiver Lab URL: "
-                    f"{self._receiver_lab_url}"
+                    "This local milestone accepts only the configured Receiver Lab "
+                    f"routes under {receiver_base}."
                 ),
             )
 
@@ -282,6 +289,26 @@ class ReplayService:
                 detail=(
                     f"Delivery {delivery_id} has status {source.status.value}; only the latest "
                     "dead-lettered generation can be replayed."
+                ),
+            )
+
+        attempts = await self._deliveries.list_attempts(source.id)
+        block_code = (
+            replay_block_code(
+                attempts[-1].http_status_code,
+                attempts[-1].response_body_excerpt,
+            )
+            if attempts
+            else None
+        )
+        if block_code is not None:
+            raise DomainError(
+                status_code=409,
+                code=block_code.value,
+                title="Payload correction is required",
+                detail=(
+                    "The receiver permanently rejected this immutable payload. Publish a "
+                    "corrected event instead of replaying the unchanged body."
                 ),
             )
 

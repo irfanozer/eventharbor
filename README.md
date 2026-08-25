@@ -24,8 +24,8 @@ The Control Room is designed around one inspectable failure-and-recovery story:
 Publish event
   -> receiver returns 503
   -> attempts and retry timing appear in the timeline
-  -> delivery reaches the dead-letter queue
-  -> receiver is repaired
+  -> automatic sending stops and the event remains saved (dead-lettered)
+  -> the test receiver is brought online
   -> an operator approves replay
   -> the signed delivery succeeds
 ```
@@ -81,11 +81,12 @@ Then visit:
 - Receiver Lab health: <http://localhost:8100/health>
 - Receiver Lab documentation: <http://localhost:8100/docs>
 
-In the Control Room, choose **Run reliability story**. Watch the real attempts
-reach a dead letter, choose **Repair receiver**, then choose **Approve replay**.
-Generation 0 remains failed while generation 1 succeeds. The full path normally
-takes less than 90 seconds with the intentionally accelerated local retry
-policy.
+In the Control Room, choose a business event and receiver behavior, then start a
+guided or manual run. In manual mode, watch the real attempts stop and remain
+saved, choose **Restore test receiver health**, then choose **Approve and replay**.
+The original evidence remains failed while the recovery delivery succeeds. The
+full path normally takes less than 90 seconds with the intentionally accelerated
+local retry policy.
 
 Follow [`docs/local-demo.md`](docs/local-demo.md) for the walkthrough and
 troubleshooting. [`docs/control-room.md`](docs/control-room.md) explains the UI,
