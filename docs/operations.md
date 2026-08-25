@@ -1,7 +1,7 @@
 # EventHarbor operations
 
-This runbook covers the small Azure public-demo deployment. It deliberately favors
-clarity and low cost over high availability.
+This runbook covers the EventHarbor Azure production deployment. It deliberately
+favors clear operations and low cost over high availability.
 
 ## Release model
 
@@ -115,7 +115,7 @@ explicit Alembic downgrade only when the data consequences are understood.
 
 ## Cost-saving modes
 
-### Normal public-demo mode
+### Normal operating mode
 
 - web: minimum 0 replicas;
 - API: minimum 0 replicas;
@@ -123,13 +123,13 @@ explicit Alembic downgrade only when the data consequences are understood.
 - worker: exactly 1 replica;
 - PostgreSQL: running.
 
-The Receiver Lab stays warm through a normal short demo flow. If a very long pause
-causes its in-memory scenario to disappear, start a different incident and resend.
+The Receiver Lab stays warm through a normal short event flow. If a long pause
+causes its in-memory scenario to disappear, start a new incident and resend.
 Keeping it at one permanent replica improves continuity but increases cost.
 
 ### Pause active delivery processing
 
-Scale the worker to zero when the demo will not be used:
+Scale the worker to zero during an intentional maintenance or cost-saving window:
 
 ```powershell
 az containerapp update `
@@ -139,7 +139,7 @@ az containerapp update `
   --max-replicas 1
 ```
 
-Restore it before sharing the demo:
+Restore it before resuming delivery processing:
 
 ```powershell
 az containerapp update `
@@ -163,7 +163,8 @@ az postgres flexible-server stop `
 ```
 
 Storage still incurs charges, the website will not work, and Azure automatically
-starts a stopped Flexible Server after seven days. Start it before a demo:
+starts a stopped Flexible Server after seven days. Start it before resuming the
+application:
 
 ```powershell
 az postgres flexible-server start `
@@ -186,13 +187,13 @@ Microsoft documents this behavior in
 - Browser API calls are same-origin.
 - PostgreSQL is private and requires TLS.
 - GitHub uses OIDC and stores no Azure password.
-- The database URL is a masked GitHub production-environment secret and a Container
+- The database URL is a masked GitHub repository Actions secret and a Container
   Apps secret reference.
-- The demo accepts synthetic portfolio data only. Never enter real customer,
-  payment, or personal data.
+- The public deployment accepts synthetic test data only. Never enter real
+  customer, payment, or personal data.
 
 Receiver Lab scenario state is intentionally in memory and its maximum replica
-count is one. This makes the failure simulator easy to understand but is not a
+count is one. This keeps each failure scenario deterministic but is not a
 high-availability design. PostgreSQL also has no HA replica in this cost-focused
 deployment.
 
@@ -203,7 +204,7 @@ At minimum create:
 - Cost Management budget alerts at 50%, 80%, and 100%;
 - PostgreSQL CPU, storage, and active-connections alerts;
 - Container Apps restart/unhealthy-replica alerts;
-- Log Analytics retention of 30 days or less for this demo.
+- Log Analytics retention of 30 days or less for this deployment.
 
 ## Permanently remove the deployment
 

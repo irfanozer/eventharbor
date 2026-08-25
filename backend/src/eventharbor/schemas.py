@@ -142,7 +142,7 @@ class DeliveryStatusCounts(BaseModel):
 
 
 class ControlRoomOverviewResponse(BaseModel):
-    """Bounded aggregate snapshot for the recruiter-facing dashboard."""
+    """Bounded aggregate snapshot for the operator-facing dashboard."""
 
     model_config = ConfigDict(extra="forbid")
 

@@ -79,7 +79,7 @@ services:
       EVENTHARBOR_ENVIRONMENT: local
       EVENTHARBOR_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-eventharbor}:${POSTGRES_PASSWORD:-eventharbor}@postgres:5432/${POSTGRES_DB:-eventharbor}
       EVENTHARBOR_RECEIVER_LAB_URL: http://receiver-lab:8100/webhooks
-      # Fast local feedback for the scripted demo. Production defaults remain
+      # Fast local feedback for the interactive demo. Production defaults remain
       # 8 attempts, 10-second base delay, and one-hour delay/cap ceilings.
       EVENTHARBOR_WORKER_MAX_ATTEMPTS: ${EVENTHARBOR_WORKER_MAX_ATTEMPTS:-4}
       EVENTHARBOR_WORKER_BASE_DELAY_SECONDS: ${EVENTHARBOR_WORKER_BASE_DELAY_SECONDS:-1}

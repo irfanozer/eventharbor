@@ -17,7 +17,7 @@ jobs:
   images:
     name: Publish immutable images
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main')
@@ -72,6 +72,12 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.release.outputs.backend_image }}
+          labels: |
+            org.opencontainers.image.title=EventHarbor Backend
+            org.opencontainers.image.description=API, delivery worker, migrations, and Receiver Lab
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.release.outputs.deploy_sha }}
+            org.opencontainers.image.licenses=MIT
           cache-from: type=gha,scope=eventharbor-backend
           cache-to: type=gha,mode=max,scope=eventharbor-backend
           provenance: mode=max
@@ -86,6 +92,12 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.release.outputs.frontend_image }}
+          labels: |
+            org.opencontainers.image.title=EventHarbor Control Room
+            org.opencontainers.image.description=React and Nginx operator interface
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.release.outputs.deploy_sha }}
+            org.opencontainers.image.licenses=MIT
           build-args: |
             VITE_RECEIVER_LAB_BASE_URL=http://eventharbor-receiver-prod/webhooks
           cache-from: type=gha,scope=eventharbor-frontend
@@ -113,9 +125,6 @@ jobs:
     needs: images
     if: vars.AZURE_DEPLOYMENT_ENABLED == 'true'
     runs-on: ubuntu-latest
-    environment:
-      name: production
-      url: ${{ steps.release.outputs.web_url }}
     permissions:
       contents: read
       id-token: write
@@ -272,6 +281,11 @@ jobs:
             --only-show-errors)"
           test -n "$web_url"
           echo "web_url=$web_url" >> "$GITHUB_OUTPUT"
+          {
+            echo "### EventHarbor production deployment"
+            echo ""
+            echo "Deployed: [$web_url]($web_url)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify the live release
         id: smoke

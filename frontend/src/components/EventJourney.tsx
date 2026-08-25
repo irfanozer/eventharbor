@@ -696,7 +696,7 @@ export function EventJourney({
       {completed && event ? (
         <section className="journey-verdict" data-tone={scenario.strategy === "terminal" ? "terminal" : "success"} aria-label="Scenario result">
           <div>
-            <p className="journey-eyebrow">Recruiter takeaway</p>
+            <p className="journey-eyebrow">What this proves</p>
             <h3>{scenario.strategy === "terminal" ? "Correctly stopped. No useless retries." : "Delivered and independently observed."}</h3>
             <p>{scenario.takeaway}</p>
           </div>

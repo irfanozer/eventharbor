@@ -120,8 +120,8 @@ describe("Reliability story idempotency", () => {
     await publishDemoEvent("endpoint-1", "run-custom", "stable-publish-key", {
       type: "shipment.dispatched",
       data: {
-        shipment_id: "SHIP-RECRUITER-7",
-        order_id: "ORDER-RECRUITER-7",
+        shipment_id: "SHIP-DEMO-7",
+        order_id: "ORDER-DEMO-7",
         carrier: "DHL",
         tracking_number: "DHL-123-US",
       },
@@ -135,8 +135,8 @@ describe("Reliability story idempotency", () => {
         run_id: "run-custom",
         scenario: "outage_replay",
         purpose: "reliability-story",
-        shipment_id: "SHIP-RECRUITER-7",
-        order_id: "ORDER-RECRUITER-7",
+        shipment_id: "SHIP-DEMO-7",
+        order_id: "ORDER-DEMO-7",
         carrier: "DHL",
         tracking_number: "DHL-123-US",
       },

@@ -179,7 +179,7 @@ describe("runReliabilityTour", () => {
     const payload: DemoEventPayload = {
       type: "order.paid",
       data: {
-        order_id: "ORDER-RECRUITER-7",
+        order_id: "ORDER-DEMO-7",
         customer_id: "CUS-7",
         amount_cents: 54_321,
         currency: "USD",

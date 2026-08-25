@@ -1,4 +1,4 @@
-"""Bounded read models for the recruiter-facing Control Room."""
+"""Bounded read models for the operator-facing Control Room."""
 
 import base64
 import json

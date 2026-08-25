@@ -31,7 +31,7 @@ export type DemoEventTypeId =
 
 export type DemoEventDataValue = string | number;
 
-/** Exact editable business event used by the recruiter-facing reliability story. */
+/** Exact editable business event used by the guided reliability scenario. */
 export interface DemoEventPayload {
   type: DemoEventTypeId;
   data: Record<string, DemoEventDataValue>;

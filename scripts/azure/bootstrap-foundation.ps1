@@ -131,21 +131,21 @@ if ($GitHubRepository) {
     Assert-Command -Name "gh"
     gh auth status | Out-Null
 
-    gh api --method PUT "repos/$GitHubRepository/environments/production" --silent
-    Write-Host "Saving the database URL as a masked GitHub production-environment secret ..."
+    $repositoryParts = $GitHubRepository.Split('/', 2)
+    if ($repositoryParts.Count -ne 2 -or [string]::IsNullOrWhiteSpace($repositoryParts[0])) {
+        throw "-GitHubRepository must use OWNER/REPOSITORY format."
+    }
+    Write-Host "Saving the database URL as a masked GitHub repository secret ..."
     $databaseUrl | gh secret set EVENTHARBOR_DATABASE_URL `
-        --env production `
         --repo $GitHubRepository
 
-    gh variable set AZURE_RESOURCE_GROUP --env production --repo $GitHubRepository --body $ResourceGroup
-    gh variable set AZURE_NAME_PREFIX --env production --repo $GitHubRepository --body $NamePrefix
-    gh variable set AZURE_ENVIRONMENT_NAME --env production --repo $GitHubRepository --body $EnvironmentName
+    gh variable set AZURE_RESOURCE_GROUP --repo $GitHubRepository --body $ResourceGroup
+    gh variable set AZURE_NAME_PREFIX --repo $GitHubRepository --body $NamePrefix
+    gh variable set AZURE_ENVIRONMENT_NAME --repo $GitHubRepository --body $EnvironmentName
     gh variable set AZURE_CONTAINER_APPS_ENVIRONMENT `
-        --env production `
         --repo $GitHubRepository `
         --body $outputs.containerAppsEnvironmentName.value
     gh variable set EVENTHARBOR_APPLICATION_ENVIRONMENT `
-        --env production `
         --repo $GitHubRepository `
         --body production
 }

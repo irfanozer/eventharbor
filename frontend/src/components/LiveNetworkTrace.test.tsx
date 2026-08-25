@@ -57,7 +57,7 @@ function attempt(number: number, status: number, duration: number, generation: 0
 const payload = {
   id: "event-7f2a",
   type: "order.paid",
-  source: "portfolio-demo",
+  source: "control-room",
   data: { order_id: "ORD-4821", amount: 129 },
 };
 
@@ -86,7 +86,7 @@ describe("LiveNetworkTrace", () => {
         runId="run-7f2a"
         eventId="event-7f2a"
         eventType="order.paid"
-        eventSource="portfolio-demo"
+        eventSource="control-room"
         eventCreatedAt="2026-08-24T14:03:01.000Z"
         payloadHash={payloadHash}
         payload={payload}
@@ -155,7 +155,7 @@ describe("LiveNetworkTrace", () => {
         demoMode="guided"
         eventId="event-7f2a"
         eventType="order.paid"
-        eventSource="portfolio-demo"
+        eventSource="control-room"
         eventCreatedAt="2026-08-24T14:03:01.000Z"
         payloadHash={payloadHash}
         payload={payload}

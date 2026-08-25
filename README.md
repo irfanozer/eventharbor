@@ -1,82 +1,101 @@
 # EventHarbor
 
-**Accept an event once. Deliver it reliably. Explain every failure.**
+**Accept an event once. Deliver it reliably. Preserve the evidence.**
 
-EventHarbor is a production-minded webhook delivery platform for systems whose
-destinations may be slow, rate-limited, unavailable, or broken. It durably
-accepts events, reserves attempt evidence before outbound network I/O, signs
-requests, records completed or indeterminate outcomes, retries transient
-failures, and dead-letters exhausted deliveries. If a worker crashes during the
-indeterminate window around an HTTP request, its expired lease is resolved and
-the event is redelivered while the configured attempt budget remains.
+EventHarbor is a webhook delivery service built around an explicit
+at-least-once reliability contract. It accepts events into PostgreSQL before
+responding, delivers them asynchronously, signs the exact outbound bytes, and
+keeps an attempt-by-attempt record of retries, failures, and recovery.
 
-> Project status: reliability engine and recruiter demo complete; Azure release
-> path prepared but not provisioned from this repository copy. PostgreSQL
-> persistence, idempotent ingestion, signed delivery, retry scheduling, attempt
-> evidence, expired-lease crash recovery, and operator-approved replay are
-> visible through the React Control Room. The cloud templates keep the API,
-> worker, Receiver Lab, and database off the public internet. Tenant isolation
-> and deeper observability remain future milestones.
+The repository includes a React Control Room and a separate Receiver Lab
+service. Together they make the delivery lifecycle observable without replacing
+the underlying API calls, database transactions, worker claims, or HTTP
+requests with a browser-only simulation.
 
-## Target signature demonstration
+## What is implemented
 
-The Control Room is designed around one inspectable failure-and-recovery story:
+- Durable event acceptance and delivery creation in one PostgreSQL transaction
+- Idempotent event publication with conflict detection
+- PostgreSQL-backed work claiming with short, fenced leases
+- HMAC-SHA256 signatures over the timestamp and exact JSON body
+- Bounded retries with full jitter and capped `Retry-After` support
+- Durable attempt evidence created before outbound network I/O
+- Recovery of expired worker leases with an explicit `indeterminate` outcome
+- Dead-lettering after permanent failure or an exhausted attempt budget
+- Idempotent, operator-approved replay that preserves the original failure
+- Cursor-paginated event, endpoint, attempt, and dead-letter queries
+- Reproducible Receiver Lab scenarios for `503`, `429`, terminal `400`, and
+  successful delivery
+- Docker Compose development environment, automated tests, Azure Bicep
+  templates, and GitHub Actions workflows
 
-```text
-Publish event
-  -> receiver returns 503
-  -> attempts and retry timing appear in the timeline
-  -> automatic sending stops and the event remains saved (dead-lettered)
-  -> the test receiver is brought online
-  -> an operator approves replay
-  -> the signed delivery succeeds
-```
+## See one delivery from acceptance to recovery
 
-The demo uses real API mutations, worker attempts, and PostgreSQL state. The
-failed generation remains visible after replay, so the success does not erase
-the evidence that preceded it.
+Start the stack and open <http://localhost:3000>. The Control Room lets you send
+a business event to a Receiver Lab route and follow the same event through:
+
+~~~text
+Browser
+  -> EventHarbor API accepts and stores the event
+  -> PostgreSQL makes the delivery durable
+  -> worker claims the delivery and sends a signed HTTP request
+  -> Receiver Lab returns the selected response
+  -> EventHarbor records the outcome and retries or stops
+~~~
+
+For the unavailable-receiver scenario, the failed delivery remains
+dead-lettered after its attempt budget is exhausted. Bringing the Receiver Lab
+route online and approving a replay creates a new delivery generation. It does
+not erase or relabel the original attempts.
+
+See [the local demo guide](docs/local-demo.md) for the complete walkthrough.
 
 ## Reliability contract
 
-EventHarbor promises **at-least-once delivery**, not exactly-once HTTP delivery.
-A worker can crash after the destination accepts a request but before success is
-recorded, creating an unavoidable duplicate-delivery window. An expired worker
-lease is reclaimed with a new fenced attempt; stable event IDs allow consumers
-to deduplicate safely.
+EventHarbor provides **at-least-once delivery**, not exactly-once HTTP delivery.
+If a destination accepts a request and the worker exits before recording the
+response, EventHarbor cannot know whether the remote side committed its work.
+Once the lease expires, that attempt is marked `indeterminate` and the stable
+event may be delivered again while attempts remain.
 
-The core guarantees and limitations are documented in
-[`docs/reliability-contract.md`](docs/reliability-contract.md).
+Webhook consumers must therefore deduplicate using
+`X-EventHarbor-Event-Id`. The precise guarantees, retry rules, state
+transitions, and replay constraints are documented in the
+[reliability contract](docs/reliability-contract.md).
 
 ## Architecture
 
-- Python and FastAPI power the API, delivery worker, and Receiver Lab.
-- PostgreSQL is the authoritative store and durable work scheduler.
-- SQLAlchemy and Alembic provide typed persistence and versioned migrations.
-- HTTPX sends exact, HMAC-signed webhook bytes without following redirects.
-- React, TypeScript, and Vite power the browser Control Room.
-- Nginx serves the production frontend and proxies same-origin `/api` requests.
-- Docker Compose starts PostgreSQL, migrations, API, worker, Receiver Lab, and
-  the frontend.
-- Azure Bicep defines a cost-focused Container Apps and private PostgreSQL
-  deployment; GitHub Actions publishes immutable images and deploys through OIDC.
+- **FastAPI** exposes endpoint registration, event publication, replay, query,
+  health, and Receiver Lab control routes.
+- **PostgreSQL** is both the source of truth and durable scheduler.
+- **SQLAlchemy** and **Alembic** provide asynchronous persistence and versioned
+  schema migrations.
+- A separate **Python delivery worker** claims due rows with
+  `FOR UPDATE SKIP LOCKED` and performs outbound HTTP outside the database
+  transaction.
+- **HTTPX** sends signed requests without following redirects.
+- **React**, **TypeScript**, **Vite**, and **TanStack Query** power the Control
+  Room.
+- **Nginx** serves the production frontend and proxies same-origin `/api`
+  traffic to FastAPI.
 
-The initial system is a modular monolith with independent API and worker
-processes. It deliberately avoids Kafka, Kubernetes, and premature
-microservices. See [`docs/architecture.md`](docs/architecture.md).
+The backend is a modular monolith with independently runnable API and worker
+processes. See [the architecture guide](docs/architecture.md) and the accepted
+[architecture decisions](docs/adr/).
 
-## Run the complete local demo
+## Quick start
 
-Prerequisites:
+### Prerequisites
 
-- Docker Desktop with Docker Compose, or Python 3.12+
+- Docker Desktop with Docker Compose
 
-Start the complete stack:
+### Run the complete system
 
-```bash
+~~~bash
 docker compose up --build
-```
+~~~
 
-Then visit:
+Open:
 
 - Control Room: <http://localhost:3000>
 - API health: <http://localhost:8000/health>
@@ -84,85 +103,108 @@ Then visit:
 - Receiver Lab health: <http://localhost:8100/health>
 - Receiver Lab documentation: <http://localhost:8100/docs>
 
-In the Control Room, choose a business event and receiver behavior, then start a
-guided or manual run. In manual mode, watch the real attempts stop and remain
-saved, choose **Restore test receiver health**, then choose **Approve and replay**.
-The original evidence remains failed while the recovery delivery succeeds. The
-full path normally takes less than 90 seconds with the intentionally accelerated
-local retry policy.
+The migration container applies the schema before the API and worker start.
+PostgreSQL data is retained in a named Docker volume.
 
-Follow [`docs/local-demo.md`](docs/local-demo.md) for the walkthrough and
-troubleshooting. [`docs/control-room.md`](docs/control-room.md) explains the UI,
-routes, API contract, retry policy, and delivery shape.
+If port `5432` is already occupied, create a `.env` file in the repository
+root with:
 
-If port `5432` is already used by PostgreSQL on your machine, create `.env` and
-set `POSTGRES_PORT=55432`. Container-to-container connections still use
-`postgres:5432`.
+~~~dotenv
+POSTGRES_PORT=55432
+~~~
 
-Run the Python checks without Docker:
+Container-to-container traffic continues to use `postgres:5432`.
 
-```bash
+Stop the stack with:
+
+~~~bash
+docker compose down
+~~~
+
+Use `docker compose down -v` only when you also intend to delete the local
+PostgreSQL volume.
+
+## Development and tests
+
+The backend requires Python 3.12 or later:
+
+~~~bash
 cd backend
 python -m venv .venv
-source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+source .venv/bin/activate
 python -m pip install -e ".[dev]"
 ruff check .
 ruff format --check .
 mypy src
 pytest
-```
+~~~
 
-Run the frontend checks:
+On Windows PowerShell, activate the environment with
+`.venv\Scripts\Activate.ps1`. PostgreSQL integration tests run when
+`EVENTHARBOR_TEST_DATABASE_URL` points to a dedicated database whose name ends
+in `_test`; otherwise those tests are skipped.
 
-```bash
+The frontend requires the Node.js version used by CI (currently Node 24):
+
+~~~bash
 cd frontend
 npm ci
 npm run typecheck
 npm test
+npm run test:runtime-config
 npm run build
-```
+~~~
 
-For Vite development with hot reload, leave the backend services running and
-use `npm run dev`, then open <http://localhost:5173>. Both Vite and Nginx proxy
-relative `/api` requests to FastAPI.
+For frontend hot reload, leave the backend services running, run `npm run dev`,
+and open <http://localhost:5173>.
 
-## Deploy the public demo
+## Deployment and operations
 
-The cloud release is intentionally separate from local Docker Compose. Start with
-[`docs/deployment.md`](docs/deployment.md), which covers the cost boundary,
-passwordless GitHub-to-Azure authentication, the first release, and the
-`eventharbor.irfanburakozer.com` Cloudflare records. Use
-[`docs/operations.md`](docs/operations.md) for health checks, logs, rollback,
-cost-saving modes, and permanent removal.
+The Azure deployment keeps only the Nginx/React application publicly reachable.
+The API and Receiver Lab use internal Container Apps ingress, the worker has no
+ingress, and PostgreSQL is attached through private networking.
 
-No cloud resources are created merely by cloning or building this repository.
+Follow:
 
-## Repository map
+- [Azure deployment](docs/deployment.md)
+- [Operations, health checks, rollback, and teardown](docs/operations.md)
 
-```text
-backend/                 FastAPI applications and delivery-domain code
-frontend/                React Control Room and Nginx container
-docs/                    Product, architecture, guarantees, and decisions
-docs/adr/                Architecture decision records
-infra/azure/             Azure Bicep templates and deployment contract
-scripts/azure/           One-time foundation, OIDC, and DNS helper scripts
-.github/workflows/       Continuous integration and gated production release
-compose.yaml             Local services
-```
+Cloning, building, or running the local stack does not create Azure resources.
 
-## Delivery roadmap
+## Current limitations
 
-1. Foundation: reliability contract, state machine, retry policy, signing, CI
-2. Vertical slice: register endpoint, publish event, persist, deliver, record attempt
-3. Reliability: leases, idempotency, retries, dead letters, replay, crash recovery
-4. Demo: live control room, deterministic failure controls, attempt timeline (complete)
-5. Security: tenant isolation, API keys, secret rotation, endpoint verification, SSRF controls
-6. Operations: OpenTelemetry, dashboards, alerts, load and recovery reports
-7. Cloud: Azure Bicep and gated GitHub OIDC deployment (prepared; launch is operator-controlled)
-8. Diagnostics: evidence-linked, read-only failure investigator with human-approved actions
+- The API does not implement user authentication, tenant isolation, or
+  per-publisher authorization.
+- Endpoint registration is intentionally restricted to Receiver Lab routes;
+  this is not a general-purpose arbitrary-URL webhook service.
+- Endpoint signing secrets are stored by the application but are not
+  application-encrypted or rotatable through the API.
+- Receiver Lab scenario state is held in process memory and is intended for
+  demonstrations and integration tests.
+- PostgreSQL polling is the only work-dispatch mechanism.
+- Delivery is at least once; duplicate HTTP requests are possible after an
+  indeterminate outcome.
 
-Only measured results will be published. Benchmark reports will include the
-commit, machine or cloud size, payload, duration, concurrency, and raw output.
+These boundaries keep the repository's claims aligned with the behavior that
+can be run and tested today.
+
+## Repository layout
+
+~~~text
+backend/                 FastAPI applications, worker, migrations, and tests
+frontend/                React Control Room, tests, and Nginx configuration
+docs/                    Architecture, reliability, deployment, and operations
+docs/adr/                Accepted architecture decision records
+infra/azure/             Azure Bicep modules
+scripts/azure/           Azure setup and deployment helpers
+.github/workflows/       Continuous integration and release workflows
+compose.yaml             Complete local environment
+~~~
+
+## Contributing
+
+Bug reports and focused pull requests are welcome. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
 ## License
 

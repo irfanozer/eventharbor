@@ -1,169 +1,111 @@
-# Local EventHarbor demo
+# Local demo guide
 
-This walkthrough proves both the normal path and the complete
-failure-recovery-replay path:
-
-```text
-publisher -> FastAPI -> PostgreSQL -> worker -> Receiver Lab
-                                      |
-                                      +-> persisted attempt evidence
-```
-
-## 1. Start the system
-
-From the repository root:
-
-```powershell
-docker compose up --build
-```
-
-Wait until PostgreSQL, Receiver Lab, API, and frontend are healthy, the migration
-process exits with code 0, and the worker is running. Leave this terminal open.
-
-If Windows already uses port `5432`, copy `.env.example` to `.env`, set
-`POSTGRES_PORT=55432`, and run the same command again. This only changes the
-Windows-to-container port; services still find the database at `postgres:5432`.
-
-If port `3000` is in use, set `FRONTEND_PORT=3001` in `.env` and open
-`http://localhost:3001` instead.
-
-## 2. Run the recruiter-first event journey
-
-Open <http://localhost:3000>. Choose one Receiver Lab incident and one of three
-business-event contracts: `order.paid`, `shipment.dispatched`, or
-`inventory.threshold_reached`. Edit the visible fields, then choose **Send this
-event and watch it move**. Each type selects a distinct route in the separate
-Receiver Lab service: `/webhooks/orders`, `/webhooks/shipping`, or
-`/webhooks/inventory`.
-
-The page collapses the input form and keeps the same event inside one live panel.
-Read the large **NOW** status first, then follow the highlighted fixed route:
+The local stack runs the same request path shown in the Control Room:
 
 ```text
 Browser -> EventHarbor API -> PostgreSQL -> delivery worker -> Receiver Lab
 ```
 
-The compact history shows every actual response from PostgreSQL attempt rows.
-The dark exchange card makes the latest destination, request number, response,
-duration, and independent Receiver Lab receipt visually dominant.
+Receiver Lab is a separate HTTP service with deterministic failure modes. It
+provides a safe destination for exercising retries, rate limits, permanent
+failures, dead-lettering, and replay without calling an external system.
 
-Available incidents are:
+## Prerequisites
 
-- **Destination outage:** `503, 503, 503, 503`, stop and save, restore the test
-  receiver's health, then approve one replay that receives `200`.
-- **Brief service outage:** `503, 503, 200`; the original delivery recovers automatically.
-- **API rate limit:** `429, 429, 200`; the first two responses include
-  `Retry-After: 2` and the worker waits accordingly.
-- **Invalid request:** the composer visibly omits one contract field. A healthy
-  Receiver Lab returns one exact `400` missing-field response; the worker
-  classifies it as permanent and does not make pointless retries.
+- Docker Desktop with the Docker Compose plugin
+- Node.js 24+ only when running the frontend development server separately
 
-The default destination-outage choice starts the complete recovery presentation.
-The order is synthetic, but the
-network and persistence path is real. The browser makes a live request through
-Nginx to FastAPI; FastAPI commits the event and its first delivery to PostgreSQL;
-the worker reads that delivery and makes actual HTTP requests to the separate
-Receiver Lab service. The Control Room finds or creates the built-in Receiver
-Lab endpoint, selects the deterministic dead-letter
-preset, and publishes a synthetic event with a unique idempotency key. These are
-real FastAPI calls that create PostgreSQL records. The worker then makes four
-real HTTP requests to Receiver Lab, and each receives `503`. The fourth failed
-attempt moves the original delivery to `dead_lettered` under the accelerated
-local retry policy.
+## Start the complete stack
 
-After the terminal state is visible through the query API, the guided demo acts
-as the presentation operator: it explicitly restores Receiver Lab's response
-mode to HTTP `200`, then calls the idempotent replay API. That API appends a
-separate recovery delivery; the worker sends it as a new HTTP request and
-persists the `200` result as `delivered`.
+From the repository root, run:
 
-The final timeline must retain both sides of the proof:
+```powershell
+docker compose up --build
+```
 
-- The original delivery remains `dead_lettered` with four completed HTTP `503` attempts.
-- The recovery replay is `delivered` with its own HTTP `200` attempt.
-- The immutable event and original failure evidence were not reset, moved, or
-  deleted during recovery.
-
-The live journey is the fastest recruiter walkthrough. Read it in this order:
-
-1. **Where it is now:** the dominant status and highlighted route node.
-2. **What happened so far:** the compact original-delivery and recovery-replay rows.
-3. **What crossed the network:** the latest real HTTP exchange and receiver URL.
-4. **Why it is credible:** EventHarbor's attempt and Receiver Lab's
-   independently captured receipt have matching event IDs, delivery IDs, attempt
-   numbers, and exact-body SHA-256 values.
-5. **Optional engineering depth:** expand exact canonical JSON, every HTTP
-   attempt, or complete PostgreSQL lineage only when needed.
-
-Receiver Lab records that a signature header arrived; it does not currently
-verify the signature, and the interface does not claim that it does.
-
-The one-click sequence is presentation orchestration, not a production
-auto-replay policy. It waits for persisted terminal evidence and then issues the
-same distinct receiver-state and explicit replay commands exposed to an operator.
-
-### Secondary operator mode
-
-Use operator mode when you want to control the recovery boundary yourself. The
-system performs the same real publish, delivery, retry, and dead-letter work but
-pauses at the original delivery. Inspect the four `503` attempts, choose
-**Restore test receiver health**, review the safety warning, and choose
-**Approve and replay**. Restoring receiver health never changes or resends the
-stopped delivery; only the separate replay approval creates a recovery delivery.
-
-You can continue exploring through the top navigation:
-
-- **Events** lists recent events and their latest delivery state.
-- **Stopped deliveries** defines the database term `dead_lettered` and contains
-  only latest deliveries that still need action.
-- **Endpoints** shows the three named Receiver Lab routes without a signing
-  secret. Older generic smoke-test registrations are grouped as historical data.
-
-The interface uses relative `/api` requests. Nginx proxies those requests to
-FastAPI inside Compose, so the browser only communicates with
-`http://localhost:3000` during the guided flow.
-
-### Concurrent visitor isolation
-
-Every browser run carries a safe run ID from its editable event payload to the
-worker and Receiver Lab. Receiver presets, counters, and receipts are stored per
-run, so concurrent visitors cannot restore or exhaust each other's scenario.
-Receiver Lab bounds this in-memory demo state to 100 recently used runs and 100
-receipts per run; PostgreSQL event, delivery, and attempt records remain durable
-independently of that bounded presentation evidence.
-
-## 3. Service addresses and troubleshooting
-
-- Control Room: <http://localhost:3000>
-- API health: <http://localhost:8000/health>
-- API documentation: <http://localhost:8000/docs>
-- Receiver Lab health: <http://localhost:8100/health>
-- Receiver Lab documentation: <http://localhost:8100/docs>
-
-Check service state with:
+The stack starts PostgreSQL, applies Alembic migrations, and then starts the API,
+worker, Receiver Lab, and frontend. Leave this terminal open. In another
+terminal, confirm that the long-running services are healthy and `migrate` exited
+with code `0`:
 
 ```powershell
 docker compose ps
 ```
 
-Follow API and worker output with:
+Open the Control Room at <http://localhost:3000>.
 
-```powershell
-docker compose logs -f api worker
-```
+## Run a scenario
 
-Stop the stack with `docker compose down`. PostgreSQL data stays in the named
-volume, so events remain available on the next start.
+1. Choose a receiver test case.
+2. Choose an event contract: `order.paid`, `shipment.dispatched`, or
+   `inventory.threshold_reached`.
+3. Edit the event fields if desired.
+4. Select **Send this event and watch it move**.
+5. Follow the highlighted route and response history until the delivery reaches
+   a terminal state.
 
-## 4. Frontend development with hot reload
+Guided mode completes the outage-recovery sequence automatically after the
+original delivery stops. Manual mode pauses at that boundary so you can bring
+the isolated receiver online and explicitly approve the replay.
 
-Run the backend services in one terminal:
+### Test cases
+
+| Test case | Receiver responses | Expected result |
+| --- | --- | --- |
+| Receiver remains unavailable | `503` four times, then an approved replay receives `200` | Automatic retries stop at the configured limit. The original delivery and its attempts remain saved; replay creates a separate successful delivery. |
+| Receiver recovers briefly | `503`, `503`, `200` | The original delivery succeeds automatically during its retry window. |
+| Receiver asks us to slow down | `429`, `429`, `200` with `Retry-After: 2` | The worker honors the receiver's delay before retrying. |
+| Receiver rejects invalid data | One `400` identifying the omitted required field | The permanent error is saved immediately without unnecessary retries. |
+
+The local retry delays are intentionally short. They make each scenario finish
+quickly without changing the delivery state machine.
+
+## Inspect the evidence
+
+The Control Room combines several independent views of the same delivery:
+
+- The route highlights whether the event is in the API, PostgreSQL, worker, or
+  Receiver Lab stage.
+- The response history is built from durable PostgreSQL delivery-attempt rows.
+- The latest HTTP exchange shows the destination, request number, response,
+  duration, and Receiver Lab receipt.
+- Matching event IDs, delivery IDs, attempt numbers, and body hashes correlate
+  EventHarbor's record with what Receiver Lab observed.
+
+Use the top navigation for additional detail:
+
+- **Events** lists accepted events and their latest delivery state.
+- **Stopped deliveries** lists deliveries that exhausted retries or encountered
+  a permanent failure. The API stores this state as `dead_lettered`.
+- **Endpoints** lists the configured Receiver Lab destinations without exposing
+  signing secrets.
+
+PostgreSQL data is stored in a named Docker volume, so evidence remains available
+after stopping and restarting the stack.
+
+## Service URLs
+
+| Service | URL |
+| --- | --- |
+| Control Room | <http://localhost:3000> |
+| EventHarbor API health | <http://localhost:8000/health> |
+| EventHarbor API documentation | <http://localhost:8000/docs> |
+| Receiver Lab health | <http://localhost:8100/health> |
+| Receiver Lab API documentation | <http://localhost:8100/docs> |
+
+The browser uses relative `/api` requests. In the complete stack, Nginx forwards
+them to the API container, so no separate browser-facing API configuration is
+required.
+
+## Frontend development with hot reload
+
+Start the backend services in one terminal:
 
 ```powershell
 docker compose up postgres migrate api worker receiver-lab
 ```
 
-Run Vite in a second terminal:
+Start Vite in a second terminal:
 
 ```powershell
 cd frontend
@@ -172,167 +114,72 @@ npm run dev
 ```
 
 Open <http://localhost:5173>. Vite proxies `/api/*` to
-`http://localhost:8000/*`, matching the Nginx behavior in the complete stack.
+`http://localhost:8000/*`, matching the Nginx route used by the complete stack.
 
-## 5. Optional API-only walkthrough
-
-The remaining steps prove the same behavior directly through HTTP calls.
-
-### 5.1 Configure a successful receiver
-
-Open a second PowerShell terminal in the repository root:
+The Compose API and Receiver Lab services also reload when files under
+`backend/src` change. Restart the worker after editing worker code:
 
 ```powershell
-$receiverConfiguration = @{
-  mode = "success"
-  failures_before_success = 0
-  delay_ms = 0
-} | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Method Put `
-  -Uri "http://localhost:8100/control" `
-  -ContentType "application/json" `
-  -Body $receiverConfiguration
+docker compose restart worker
 ```
 
-### 5.2 Register Receiver Lab
+## Troubleshooting
+
+### Docker engine is unavailable
+
+If the error mentions `dockerDesktopLinuxEngine` or a missing named pipe, start
+Docker Desktop and wait until its engine reports that it is running.
+
+### A local port is already in use
+
+Copy `.env.example` to `.env` and override the conflicting host port:
+
+```dotenv
+POSTGRES_PORT=55432
+FRONTEND_PORT=3001
+```
+
+Container-to-container database traffic still uses `postgres:5432`. If you
+change `FRONTEND_PORT`, open the corresponding localhost port in the browser.
+
+### A service is unhealthy or an event does not progress
+
+Inspect service state and recent output:
 
 ```powershell
-$endpointRequest = @{
-  name = "Local Receiver Lab"
-  url = "http://receiver-lab:8100/webhooks"
-} | ConvertTo-Json
-
-$endpoint = Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://localhost:8000/v1/endpoints" `
-  -ContentType "application/json" `
-  -Body $endpointRequest
-
-$endpoint
+docker compose ps
+docker compose logs --tail 200 migrate postgres api worker receiver-lab frontend
 ```
 
-The response includes a signing secret because this local milestone shows the
-secret once at creation. Do not use this storage design in production.
-
-### 5.3 Publish an event
+Follow the API, worker, and Receiver Lab while running another scenario:
 
 ```powershell
-$eventRequest = @{
-  endpoint_id = $endpoint.id
-  type = "demo.order.created"
-  data = @{
-    order_id = "order-123"
-    amount = 4200
-  }
-} | ConvertTo-Json -Depth 5
-
-$event = Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://localhost:8000/v1/events" `
-  -ContentType "application/json" `
-  -Headers @{ "Idempotency-Key" = "demo-order-123-created" } `
-  -Body $eventRequest
-
-$event
+docker compose logs -f api worker receiver-lab
 ```
 
-The API returns `202` only after the event and its initial delivery are
-committed together. Repeating the same request and idempotency key returns the
-same event. Reusing the key with different data returns `409`.
-
-### 5.4 Inspect delivery evidence
-
-Wait one second for the worker, then run:
+If source or dependency changes are not reflected, rebuild and recreate the
+containers:
 
 ```powershell
-$eventDetail = Invoke-RestMethod `
-  -Uri ("http://localhost:8000/v1/events/" + $event.event_id)
-
-$attempts = Invoke-RestMethod `
-  -Uri ("http://localhost:8000/v1/deliveries/" + $event.delivery_id + "/attempts")
-
-$received = Invoke-RestMethod -Uri "http://localhost:8100/requests"
-
-$eventDetail | ConvertTo-Json -Depth 10
-$attempts | ConvertTo-Json -Depth 10
-$received | ConvertTo-Json -Depth 10
+docker compose up --build --force-recreate
 ```
 
-You should see `delivered`, one `succeeded` attempt with HTTP `200`, and one
-Receiver Lab request containing the stable event ID and an HMAC signature. The
-event detail also shows `payload_sha256`, the digest of the exact outbound body,
-and `request_fingerprint_sha256`, the separate value used for idempotency.
+## Stop or reset
 
-Swagger is also available at <http://localhost:8000/docs> and
-<http://localhost:8100/docs>.
-
-### 5.5 Send data that the receiver contract rejects
-
-Keep Receiver Lab healthy. Register its named orders route, then deliberately
-omit `data.customer_id`, which that route requires:
+Stop the stack while preserving PostgreSQL data:
 
 ```powershell
-$ordersEndpointRequest = @{
-  name = "Orders receiver · Receiver Lab"
-  url = "http://receiver-lab:8100/webhooks/orders"
-} | ConvertTo-Json
-
-$ordersEndpoint = Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://localhost:8000/v1/endpoints" `
-  -ContentType "application/json" `
-  -Body $ordersEndpointRequest
-
-$invalidOrderRequest = @{
-  endpoint_id = $ordersEndpoint.id
-  type = "order.paid"
-  data = @{
-    order_id = "ORDER-INVALID-1"
-    amount_cents = 9900
-    currency = "USD"
-  }
-} | ConvertTo-Json -Depth 5
-
-$invalidOrder = Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://localhost:8000/v1/events" `
-  -ContentType "application/json" `
-  -Headers @{ "Idempotency-Key" = "invalid-order-missing-customer-1" } `
-  -Body $invalidOrderRequest
-
-do {
-  Start-Sleep -Milliseconds 250
-  $invalidAttempts = Invoke-RestMethod `
-    -Uri ("http://localhost:8000/v1/deliveries/" + $invalidOrder.delivery_id + "/attempts")
-} while ($invalidAttempts.delivery.status -ne "dead_lettered")
-
-$invalidAttempts | ConvertTo-Json -Depth 10
+docker compose down
 ```
 
-The result is one real HTTP `400` attempt with disposition
-`terminal_failure` and response code `missing_customer_id`. The receiver was
-online; the actual JSON body caused the rejection.
+To start again, run `docker compose up --build`.
 
-### 5.6 Prove that unchanged replay is blocked
-
-The event body is immutable, so resending it cannot add the missing field.
-EventHarbor returns `409 payload_correction_required` instead of creating a
-misleading replay delivery:
+To remove all local EventHarbor database data and start from an empty database,
+delete the named volumes as well:
 
 ```powershell
-try {
-  Invoke-RestMethod `
-    -Method Post `
-    -Uri ("http://localhost:8000/v1/deliveries/" + $invalidOrder.delivery_id + "/replays") `
-    -Headers @{ "Idempotency-Key" = "unsafe-invalid-order-replay-1" }
-} catch {
-  $_.ErrorDetails.Message
-}
+docker compose down --volumes
 ```
 
-Publish a new corrected event with `customer_id` to demonstrate the successful
-path. Replay remains available for transient failures, such as the long `503`
-outage in the browser demo, after the destination is brought online and an
-operator explicitly approves recovery.
+The final command permanently deletes local events, deliveries, attempts, and
+endpoint registrations stored in the Compose volume.

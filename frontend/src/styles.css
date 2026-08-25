@@ -253,7 +253,7 @@ button:disabled { opacity: .55; cursor: wait; }
 .receiver-strip dt { font-family: var(--mono); font-size: 10px; text-transform: uppercase; color: var(--muted); }
 .receiver-strip dd { margin: 9px 0 0; font-weight: 700; text-transform: capitalize; }
 
-/* Recruiter-first reliability proof */
+/* Reliability proof */
 .reliability-hero-actions { margin-top: 36px; display: flex; flex-wrap: wrap; align-items: center; gap: 18px; }
 .reliability-hero-actions .story-action { width: min(100%, 430px); margin: 0; }
 .reliability-hero-link { padding: 12px 2px 7px; border-bottom: 1px solid var(--cobalt); color: var(--cobalt); font-family: var(--mono); font-size: 11px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
@@ -781,7 +781,7 @@ button:disabled { opacity: .55; cursor: wait; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
 
-/* One-event recruiter journey */
+/* One-event reliability journey */
 .composer-topline { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 18px; }
 .composer-topline .section-index { margin: 0; }
 .composer-mode-switch { width: fit-content; justify-self: end; display: inline-grid; grid-template-columns: repeat(2, auto); border: 1px solid var(--ink); }

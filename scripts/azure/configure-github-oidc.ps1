@@ -10,7 +10,7 @@ param(
     [string] $GitHubRepository,
 
     [string] $ResourceGroup = "rg-eventharbor-prod",
-    [string] $GitHubEnvironment = "production",
+    [string] $GitHubBranch = "main",
     [string] $ApplicationName = "eventharbor-github-production",
     [switch] $ConfigureGitHub
 )
@@ -77,8 +77,9 @@ if (-not $servicePrincipalId) {
         --only-show-errors
 }
 
-$credentialName = "github-$GitHubEnvironment"
-$subject = "repo:${GitHubOwner}/${GitHubRepository}:environment:${GitHubEnvironment}"
+$credentialBranchName = $GitHubBranch -replace '[^A-Za-z0-9-]', '-'
+$credentialName = "github-$credentialBranchName"
+$subject = "repo:${GitHubOwner}/${GitHubRepository}:ref:refs/heads/${GitHubBranch}"
 $existingCredential = az ad app federated-credential list `
     --id $applicationObjectId `
     --query "[?name=='$credentialName'].name | [0]" `
@@ -101,7 +102,7 @@ if (-not $existingCredential) {
             [System.Text.UTF8Encoding]::new($false)
         )
 
-        Write-Host "Creating the GitHub production-environment trust relationship ..."
+        Write-Host "Creating the GitHub main-branch trust relationship ..."
         az ad app federated-credential create `
             --id $applicationObjectId `
             --parameters "@$credentialFile" `
@@ -138,11 +139,9 @@ if ($ConfigureGitHub) {
     gh auth status | Out-Null
     $repository = "$GitHubOwner/$GitHubRepository"
 
-    gh api --method PUT "repos/$repository/environments/$GitHubEnvironment" --silent
-    gh variable set AZURE_CLIENT_ID --env $GitHubEnvironment --repo $repository --body $clientId
-    gh variable set AZURE_TENANT_ID --env $GitHubEnvironment --repo $repository --body $tenantId
+    gh variable set AZURE_CLIENT_ID --repo $repository --body $clientId
+    gh variable set AZURE_TENANT_ID --repo $repository --body $tenantId
     gh variable set AZURE_SUBSCRIPTION_ID `
-        --env $GitHubEnvironment `
         --repo $repository `
         --body $SubscriptionId
 }
@@ -154,5 +153,5 @@ Write-Host "AZURE_CLIENT_ID: $clientId"
 Write-Host "AZURE_TENANT_ID: $tenantId"
 Write-Host "AZURE_SUBSCRIPTION_ID: $SubscriptionId"
 if (-not $ConfigureGitHub) {
-    Write-Host "Add these three values as variables in the GitHub '$GitHubEnvironment' environment."
+    Write-Host "Add these three values as GitHub repository Actions variables."
 }
