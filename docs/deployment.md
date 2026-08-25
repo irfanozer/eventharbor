@@ -173,15 +173,20 @@ Create passwordless trust between the repository's `main` branch and Azure:
 
 The script creates a Microsoft Entra application and service principal, assigns
 `Contributor` only on `rg-eventharbor-prod`, and creates this exact federated
-subject:
+subject using GitHub's permanent owner and repository IDs:
 
 ```text
-repo:YOUR_GITHUB_USER/YOUR_REPOSITORY:ref:refs/heads/main
+repo:YOUR_GITHUB_USER@OWNER_ID/YOUR_REPOSITORY@REPOSITORY_ID:ref:refs/heads/main
 ```
 
 No Azure password or client secret is created. The client, tenant, and
 subscription IDs are saved as non-secret GitHub repository variables. Azure
 accepts deployment identity only from this repository's `main` branch.
+
+GitHub.com repositories created, renamed, or transferred after July 15, 2026
+use this immutable subject format. The setup script reads the canonical names
+and numeric IDs from GitHub and updates an older name-only Azure credential when
+necessary.
 
 If role assignment fails, the signed-in Azure account needs `Owner` or `User
 Access Administrator` permission for the one-time setup.
