@@ -7,6 +7,7 @@ param(
     [string] $ResourceGroup = "rg-eventharbor-prod",
     [string] $NamePrefix = "eventharbor",
     [string] $EnvironmentName = "prod",
+    [string] $CustomDomain = "eventharbor.irfanburakozer.com",
     [string] $PostgresAdministratorLogin = "eventharbor_admin",
     [string] $PostgresDatabaseName = "eventharbor",
     [SecureString] $PostgresAdministratorPassword,
@@ -148,6 +149,9 @@ if ($GitHubRepository) {
     gh variable set EVENTHARBOR_APPLICATION_ENVIRONMENT `
         --repo $GitHubRepository `
         --body production
+    gh variable set EVENTHARBOR_CUSTOM_DOMAIN `
+        --repo $GitHubRepository `
+        --body $CustomDomain
 }
 else {
     Write-Warning "The generated database URL was not saved because -GitHubRepository was omitted."

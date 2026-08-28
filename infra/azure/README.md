@@ -90,8 +90,10 @@ templates intentionally contain no GHCR username, password, or registry secret.
 | `databaseUrl` | Required, secure | Async PostgreSQL connection URL |
 | `applicationEnvironment` | `production` | Runtime safeguards |
 | `logLevel` | `INFO` | Application log level |
-| `webMinReplicas` / `webMaxReplicas` | `0` / `1` | Web scaling bounds |
-| `apiMinReplicas` / `apiMaxReplicas` | `1` / `2` | API scaling bounds; the workflow overrides the minimum to `0` |
+| `webCustomDomainName` | Empty | Existing public hostname to preserve during app updates |
+| `webCustomDomainCertificateId` | Empty | Existing Azure managed-certificate resource ID bound to that hostname |
+| `webMinReplicas` / `webMaxReplicas` | `1` / `1` | Web scaling bounds; one warm replica avoids first-page cold starts |
+| `apiMinReplicas` / `apiMaxReplicas` | `1` / `2` | API scaling bounds; one warm replica avoids a second cold start after React loads |
 | `workerMinReplicas` / `workerMaxReplicas` | `1` / `1` | Delivery worker scaling bounds |
 | `receiverMinReplicas` / `receiverMaxReplicas` | `0` / `1` | Receiver Lab scaling bounds |
 | Retry parameters | 4 attempts, 1-second base, 2-second delay caps | Accelerated hosted-demo retry behavior |

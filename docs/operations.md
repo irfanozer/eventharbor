@@ -117,15 +117,17 @@ explicit Alembic downgrade only when the data consequences are understood.
 
 ### Normal operating mode
 
-- web: minimum 0 replicas;
-- API: minimum 0 replicas;
+- web: exactly 1 warm replica;
+- API: minimum 1 replica, maximum 2;
 - Receiver Lab: minimum 0 replicas, maximum 1;
 - worker: exactly 1 replica;
 - PostgreSQL: running.
 
-The Receiver Lab stays warm through a normal short event flow. If a long pause
-causes its in-memory scenario to disappear, start a new incident and resend.
-Keeping it at one permanent replica improves continuity but increases cost.
+The web and API remain warm so a visitor does not pay two sequential cold starts
+before the live control room becomes usable. Receiver Lab stays warm through a
+normal short event flow. If a long pause causes its in-memory scenario to
+disappear, start a new incident and resend. Keeping it at one permanent replica
+improves continuity but increases cost.
 
 ### Pause active delivery processing
 

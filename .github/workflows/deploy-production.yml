@@ -134,6 +134,7 @@ jobs:
       ENVIRONMENT_NAME: ${{ vars.AZURE_ENVIRONMENT_NAME || 'prod' }}
       CONTAINER_APPS_ENVIRONMENT: ${{ vars.AZURE_CONTAINER_APPS_ENVIRONMENT || 'cae-eventharbor-prod' }}
       APPLICATION_ENVIRONMENT: ${{ vars.EVENTHARBOR_APPLICATION_ENVIRONMENT || 'production' }}
+      CUSTOM_DOMAIN: ${{ vars.EVENTHARBOR_CUSTOM_DOMAIN || 'eventharbor.irfanburakozer.com' }}
       DATABASE_URL: ${{ secrets.EVENTHARBOR_DATABASE_URL }}
       BACKEND_IMAGE: ${{ needs.images.outputs.backend_image }}
       FRONTEND_IMAGE: ${{ needs.images.outputs.frontend_image }}
@@ -174,6 +175,53 @@ jobs:
           az bicep build --file infra/azure/foundation.bicep --stdout > /dev/null
           az bicep build --file infra/azure/migration.bicep --stdout > /dev/null
           az bicep build --file infra/azure/apps.bicep --stdout > /dev/null
+
+      - name: Preserve the existing custom domain and certificate
+        id: custom_domain
+        shell: bash
+        run: |
+          set -euo pipefail
+          web_app="${NAME_PREFIX}-web-${ENVIRONMENT_NAME}"
+          existing_web_app="$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$web_app" \
+            --query name \
+            --output tsv \
+            --only-show-errors 2>/dev/null || true)"
+
+          if [[ -z "$existing_web_app" ]]; then
+            echo "No existing web app was found. Deploy the generated Azure hostname, configure DNS and the managed certificate once, then future releases will preserve it."
+            echo "domain_name=" >> "$GITHUB_OUTPUT"
+            echo "certificate_id=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          certificate_id="$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$web_app" \
+            --query "properties.configuration.ingress.customDomains[?name=='${CUSTOM_DOMAIN}'].certificateId | [0]" \
+            --output tsv \
+            --only-show-errors 2>/dev/null || true)"
+
+          if [[ -z "$certificate_id" ]]; then
+            certificate_id="$(az containerapp env certificate list \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$CONTAINER_APPS_ENVIRONMENT" \
+              --managed-certificates-only \
+              --query "[?contains(properties.subjectName, '${CUSTOM_DOMAIN}')].id | [0]" \
+              --output tsv \
+              --only-show-errors 2>/dev/null || true)"
+          fi
+
+          if [[ -z "$certificate_id" ]]; then
+            echo "The existing web app has no Azure managed certificate for ${CUSTOM_DOMAIN}." >&2
+            echo "The release is stopping before deployment so the custom-domain binding cannot be removed." >&2
+            exit 1
+          fi
+
+          echo "Preserving ${CUSTOM_DOMAIN} with its existing Azure managed certificate."
+          echo "domain_name=$CUSTOM_DOMAIN" >> "$GITHUB_OUTPUT"
+          echo "certificate_id=$certificate_id" >> "$GITHUB_OUTPUT"
 
       - name: Create or update the migration job
         id: migration
@@ -272,8 +320,10 @@ jobs:
               backendImage="$BACKEND_IMAGE" \
               databaseUrl="$DATABASE_URL" \
               applicationEnvironment="$APPLICATION_ENVIRONMENT" \
-              webMinReplicas=0 webMaxReplicas=1 \
-              apiMinReplicas=0 apiMaxReplicas=2 \
+              webCustomDomainName="${{ steps.custom_domain.outputs.domain_name }}" \
+              webCustomDomainCertificateId="${{ steps.custom_domain.outputs.certificate_id }}" \
+              webMinReplicas=1 webMaxReplicas=1 \
+              apiMinReplicas=1 apiMaxReplicas=2 \
               workerMinReplicas=1 workerMaxReplicas=1 \
               receiverMinReplicas=0 receiverMaxReplicas=1 \
             --query properties.outputs.webAppUrl.value \
@@ -281,20 +331,43 @@ jobs:
             --only-show-errors)"
           test -n "$web_url"
           echo "web_url=$web_url" >> "$GITHUB_OUTPUT"
+          public_url="$web_url"
+          if [[ -n "${{ steps.custom_domain.outputs.domain_name }}" ]]; then
+            public_url="https://${{ steps.custom_domain.outputs.domain_name }}"
+          fi
+          echo "public_url=$public_url" >> "$GITHUB_OUTPUT"
           {
             echo "### EventHarbor production deployment"
             echo ""
-            echo "Deployed: [$web_url]($web_url)"
+            echo "Deployed: [$public_url]($public_url)"
+            echo ""
+            echo "Azure origin: [$web_url]($web_url)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify the live release
         id: smoke
         continue-on-error: true
         env:
-          WEB_URL: ${{ steps.release.outputs.web_url }}
+          WEB_URL: ${{ steps.release.outputs.public_url }}
+          CUSTOM_DOMAIN_NAME: ${{ steps.custom_domain.outputs.domain_name }}
+          CUSTOM_DOMAIN_CERTIFICATE_ID: ${{ steps.custom_domain.outputs.certificate_id }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -n "$CUSTOM_DOMAIN_NAME" ]]; then
+            web_app="${NAME_PREFIX}-web-${ENVIRONMENT_NAME}"
+            bound_certificate_id="$(az containerapp show \
+              --resource-group "$RESOURCE_GROUP" \
+              --name "$web_app" \
+              --query "properties.configuration.ingress.customDomains[?name=='${CUSTOM_DOMAIN_NAME}'].certificateId | [0]" \
+              --output tsv \
+              --only-show-errors)"
+            if [[ -z "$bound_certificate_id" || "$bound_certificate_id" != "$CUSTOM_DOMAIN_CERTIFICATE_ID" ]]; then
+              echo "The ${CUSTOM_DOMAIN_NAME} certificate binding was not preserved." >&2
+              exit 1
+            fi
+          fi
+
           paths=("/healthz" "/api/health" "/api/ready" "/api/v1/control-room/overview")
 
           for path in "${paths[@]}"; do
@@ -338,8 +411,10 @@ jobs:
               backendImage="$PREVIOUS_BACKEND_IMAGE" \
               databaseUrl="$DATABASE_URL" \
               applicationEnvironment="$APPLICATION_ENVIRONMENT" \
-              webMinReplicas=0 webMaxReplicas=1 \
-              apiMinReplicas=0 apiMaxReplicas=2 \
+              webCustomDomainName="${{ steps.custom_domain.outputs.domain_name }}" \
+              webCustomDomainCertificateId="${{ steps.custom_domain.outputs.certificate_id }}" \
+              webMinReplicas=1 webMaxReplicas=1 \
+              apiMinReplicas=1 apiMaxReplicas=2 \
               workerMinReplicas=1 workerMaxReplicas=1 \
               receiverMinReplicas=0 receiverMaxReplicas=1 \
             --only-show-errors \

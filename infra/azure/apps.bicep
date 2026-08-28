@@ -44,8 +44,14 @@ param applicationEnvironment string = 'production'
 @description('Backend logging level.')
 param logLevel string = 'INFO'
 
+@description('Optional custom hostname for the public web app. Supply it together with webCustomDomainCertificateId.')
+param webCustomDomainName string = ''
+
+@description('Optional Azure managed-certificate resource ID for webCustomDomainName. Supply it together with webCustomDomainName.')
+param webCustomDomainCertificateId string = ''
+
 @minValue(0)
-param webMinReplicas int = 0
+param webMinReplicas int = 1
 
 @minValue(1)
 param webMaxReplicas int = 1
@@ -98,6 +104,13 @@ var cleanupJobName = '${normalizedPrefix}-cleanup-${normalizedEnvironment}'
 var apiInternalOrigin = 'http://${apiAppName}'
 var receiverInternalOrigin = 'http://${receiverAppName}'
 var receiverWebhookBaseUrl = '${receiverInternalOrigin}/webhooks'
+var webCustomDomains = !empty(webCustomDomainName) && !empty(webCustomDomainCertificateId) ? [
+  {
+    name: webCustomDomainName
+    bindingType: 'SniEnabled'
+    certificateId: webCustomDomainCertificateId
+  }
+] : []
 var resourceTags = union({
   application: 'EventHarbor'
   environment: normalizedEnvironment
@@ -526,6 +539,7 @@ resource webApp 'Microsoft.App/containerApps@2026-01-01' = {
       maxInactiveRevisions: 3
       ingress: {
         allowInsecure: false
+        customDomains: webCustomDomains
         external: true
         targetPort: 8080
         transport: 'auto'
@@ -617,6 +631,7 @@ resource webApp 'Microsoft.App/containerApps@2026-01-01' = {
 output webAppName string = webApp.name
 output webAppFqdn string = webApp.properties.configuration.ingress.fqdn
 output webAppUrl string = 'https://${webApp.properties.configuration.ingress.fqdn}'
+output webCustomDomainUrl string = empty(webCustomDomainName) ? '' : 'https://${webCustomDomainName}'
 output apiAppName string = apiApp.name
 output apiInternalOrigin string = apiInternalOrigin
 output receiverAppName string = receiverApp.name

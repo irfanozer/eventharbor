@@ -1,6 +1,3 @@
-Live Demo: https://eventharbor.irfanburakozer.com
-
-
 # EventHarbor
 
 **Accept an event once. Deliver it reliably. Preserve the evidence.**

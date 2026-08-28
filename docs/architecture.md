@@ -202,9 +202,11 @@ daily bounded retention job ----------------------> PostgreSQL
 
 Only the web application has external ingress. PostgreSQL uses a delegated
 subnet and private DNS. Production database connections require TLS. The web
-application, API, and Receiver Lab can scale to zero; the polling worker keeps
-one replica so queued deliveries continue to move. Receiver Lab is limited to
-one replica because scenario state is kept in process memory.
+application and API each keep one warm replica so the public page and its first
+live-data request do not pay sequential cold starts. The polling worker also
+keeps one replica so queued deliveries continue to move. Receiver Lab can scale
+to zero and is limited to one replica because scenario state is kept in process
+memory.
 
 See the [deployment guide](deployment.md) and [operations guide](operations.md).
 

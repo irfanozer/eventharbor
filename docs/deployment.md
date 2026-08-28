@@ -48,16 +48,16 @@ resources. The first command that can create recurring Azure cost is
 `bootstrap-foundation.ps1 -ConfirmCosts`.
 
 The main recurring resources are PostgreSQL Flexible Server, one continuously
-available delivery worker, and Log Analytics ingestion. The web, API, and
-Receiver Lab scale to zero when idle.
+available delivery worker, one warm web replica, one warm API replica, and Log
+Analytics ingestion. Receiver Lab still scales to zero when idle.
 
 The selected PostgreSQL configuration is Burstable B1ms with 32 GB storage. For
 an eligible new Azure account, this matches the published 12-month PostgreSQL
-allowance. Container Apps also includes a monthly consumption grant. Allow
-approximately **$0-$15 per month during an eligible first year** and **$20-$40
-per month after the PostgreSQL benefit expires** for light traffic. These are
-planning estimates, not guarantees; region, usage, and subscription benefits
-determine the actual bill.
+allowance. Container Apps also includes a monthly consumption grant, but the
+warm web and API replicas can incur reduced idle charges after that grant is
+used. Use the Azure pricing calculator for the selected region; traffic,
+subscription benefits, and idle-versus-active billing determine the actual
+bill.
 
 Before provisioning:
 
@@ -201,6 +201,8 @@ variables > Actions**:
   `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_NAME_PREFIX`,
   `AZURE_ENVIRONMENT_NAME`, `AZURE_CONTAINER_APPS_ENVIRONMENT`, and
   `EVENTHARBOR_APPLICATION_ENVIRONMENT`
+- Optional explicit hostname variable: `EVENTHARBOR_CUSTOM_DOMAIN` (the release
+  workflow defaults to `eventharbor.irfanburakozer.com`)
 
 Enable Azure deployment:
 
@@ -218,11 +220,16 @@ The workflow:
 3. validates the Bicep templates;
 4. runs Alembic and waits for the migration to succeed;
 5. deploys Receiver Lab, API, worker, web, and daily cleanup;
-6. verifies the web, API, database readiness, and control-room endpoints;
-7. restores the previous application images if live verification fails.
+6. preserves the existing custom hostname and Azure managed-certificate binding
+   in both the release and automatic rollback;
+7. verifies the custom hostname, web, API, database readiness, and control-room
+   endpoints;
+8. restores the previous application images if live verification fails.
 
-The workflow summary contains the generated Azure URL. Open it and complete one
-guided event flow before configuring the custom domain.
+Before the first custom-domain setup, the workflow summary contains the generated
+Azure URL. Open it and complete one guided event flow before configuring the
+custom domain. After the certificate is bound, later summaries use the public
+custom URL and also retain the generated Azure origin as a diagnostic link.
 
 Set `AZURE_DEPLOYMENT_ENABLED` to `false` whenever you intentionally want CI to
 continue without changing Azure.
@@ -259,6 +266,14 @@ After DNS resolves:
 3. enter `eventharbor.irfanburakozer.com`;
 4. choose an **Azure managed certificate**;
 5. wait for validation and binding to finish.
+
+This portal operation is required only for the first custom-domain setup. On
+later releases, GitHub Actions discovers the bound managed-certificate resource
+ID before changing the Container App and passes both the hostname and certificate
+into Bicep. If the certificate cannot be found, the release stops before the web
+app is changed. The normal deployment, live smoke test, and automatic rollback
+all use `eventharbor.irfanburakozer.com`, so a release cannot silently fall back
+to only the generated Azure hostname.
 
 ## 7. Verify production
 
