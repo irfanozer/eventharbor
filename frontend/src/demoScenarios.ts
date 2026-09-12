@@ -48,8 +48,8 @@ export const DEMO_SCENARIOS: readonly DemoScenario[] = [
     strategy: "automatic",
     sequence: ["429", "429", "200"],
     summary: "The destination asks EventHarbor to slow down before accepting the request.",
-    contract: "Receiver Lab returns HTTP 429 twice with Retry-After: 2, then HTTP 200. The worker follows the receiver's timing.",
-    cause: "Requests 1 and 2 return HTTP 429 with Retry-After: 2 seconds. The worker waits instead of sending continuously; request 3 is accepted.",
+    contract: "Receiver Lab returns HTTP 429 twice with Retry-After: 5, then HTTP 200. The worker follows the receiver's timing.",
+    cause: "Requests 1 and 2 return HTTP 429 with Retry-After: 5 seconds. The worker waits instead of sending continuously; request 3 is accepted.",
     takeaway: "EventHarbor waited instead of hammering a busy API.",
   },
   {

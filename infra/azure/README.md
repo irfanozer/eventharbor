@@ -96,7 +96,7 @@ templates intentionally contain no GHCR username, password, or registry secret.
 | `apiMinReplicas` / `apiMaxReplicas` | `1` / `2` | API scaling bounds; one warm replica avoids a second cold start after React loads |
 | `workerMinReplicas` / `workerMaxReplicas` | `1` / `1` | Delivery worker scaling bounds |
 | `receiverMinReplicas` / `receiverMaxReplicas` | `0` / `1` | Receiver Lab scaling bounds |
-| Retry parameters | 4 attempts, 1-second base, 2-second delay caps | Accelerated hosted-demo retry behavior |
+| Retry parameters | 4 attempts, 1-second base, 2-second backoff cap, 5-second Retry-After cap | Fast outage retries with a visible five-second pause when the receiver is busy |
 
 `parameters.example.json` contains no secrets. The deployment workflow supplies
 the database URL from the masked `EVENTHARBOR_DATABASE_URL` repository secret.

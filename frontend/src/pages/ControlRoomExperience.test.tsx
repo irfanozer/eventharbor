@@ -179,6 +179,10 @@ describe("ControlRoomExperience", () => {
     expect(sessionStorage.getItem("eventharbor.control-room.event-id")).toBe(eventId);
     expect(sessionStorage.getItem("eventharbor.control-room.tour")).toContain(eventId);
 
+    fireEvent.click(screen.getByRole("button", { name: /the receiver is busy/i }));
+    expect(screen.getByText(/asks for a five-second wait twice/i)).toBeVisible();
+    expect(screen.getByText("Wait 5 seconds before retrying")).toBeVisible();
+
     fireEvent.click(screen.getByRole("button", { name: /a required field is missing/i }));
     expect(screen.getAllByText("data.customer_id").length).toBeGreaterThan(0);
     expect(screen.getByText(/intentionally omitted from the JSON body/i)).toBeVisible();

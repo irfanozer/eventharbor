@@ -18,6 +18,7 @@ from eventharbor.demo_runs import DEMO_RUN_ID_MAX_LENGTH, DEMO_RUN_ID_PATTERN
 MAX_SCOPED_RUNS = 100
 MAX_REQUESTS_PER_RUN = 100
 CONTROL_REQUEST_LIMIT = 20
+RATE_LIMIT_RETRY_AFTER_SECONDS = 5
 
 
 class ReceiverContract(TypedDict):
@@ -233,7 +234,11 @@ def _response_evidence(
     if validation_error is not None:
         return validation_error
     if status_code == status.HTTP_429_TOO_MANY_REQUESTS:
-        return "rate_limited", "Receiver Lab asked the worker to retry after 2 seconds."
+        return (
+            "rate_limited",
+            "Receiver Lab asked the worker to retry after "
+            f"{RATE_LIMIT_RETRY_AFTER_SECONDS} seconds.",
+        )
     if status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
         return "temporarily_unavailable", "Receiver Lab is in the controlled unavailable state."
     return "accepted", "Receiver Lab accepted the webhook."
@@ -327,7 +332,9 @@ async def receive_webhook(
     if configuration.mode == ReceiverMode.TIMEOUT:
         await asyncio.sleep(configuration.delay_ms / 1_000)
     headers = (
-        {"Retry-After": "2"} if response_status_code == status.HTTP_429_TOO_MANY_REQUESTS else None
+        {"Retry-After": str(RATE_LIMIT_RETRY_AFTER_SECONDS)}
+        if response_status_code == status.HTTP_429_TOO_MANY_REQUESTS
+        else None
     )
     return JSONResponse(
         status_code=response_status_code,

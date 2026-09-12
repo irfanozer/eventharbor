@@ -91,23 +91,26 @@ async def test_non_demo_webhook_omits_internal_run_header() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_is_retryable_and_retry_after_is_capped() -> None:
+@pytest.mark.parametrize(("requested", "cap", "expected"), [(120, 30, 30), (5, 5, 5)])
+async def test_rate_limit_is_retryable_and_retry_after_is_capped(
+    requested: int, cap: int, expected: int
+) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, headers={"Retry-After": "120"})
+        return httpx.Response(429, headers={"Retry-After": str(requested)})
 
     now = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         result = await send_webhook(
             webhook(),
             client,
-            retry_after_cap_seconds=30,
+            retry_after_cap_seconds=cap,
             clock=clock([now, now]),
             monotonic_clock=monotonic([1.0, 1.001]),
         )
 
     assert result.disposition == DeliveryDisposition.RETRY
     assert result.http_status_code == 429
-    assert result.retry_after_seconds == 30
+    assert result.retry_after_seconds == expected
 
 
 @pytest.mark.asyncio

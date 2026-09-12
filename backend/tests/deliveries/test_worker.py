@@ -462,20 +462,30 @@ async def test_success_finalization_persists_attempt_and_marks_delivery_delivere
 
 
 @pytest.mark.asyncio
-async def test_retry_finalization_uses_larger_of_full_jitter_and_retry_after() -> None:
+@pytest.mark.parametrize(
+    ("retry_after_seconds", "base_delay", "max_delay"),
+    [(12, 10, 60), (5, 1, 2)],
+)
+async def test_retry_finalization_uses_larger_of_full_jitter_and_retry_after(
+    retry_after_seconds: int, base_delay: int, max_delay: int
+) -> None:
     delivery = _delivery()
     attempt = _attempt()
     session = _FakeSession(delivery, attempts=[attempt])
-    worker = _worker(session)
+    worker = _worker(
+        session,
+        worker_base_delay_seconds=base_delay,
+        worker_max_delay_seconds=max_delay,
+    )
     result = _result(
         DeliveryDisposition.RETRY,
         status_code=429,
-        retry_after_seconds=12,
+        retry_after_seconds=retry_after_seconds,
     )
 
     finalized = await worker.finalize(_webhook(), result)
 
-    expected_retry_at = NOW + timedelta(seconds=12)
+    expected_retry_at = NOW + timedelta(seconds=retry_after_seconds)
     assert finalized is True
     assert delivery.status == DeliveryStatus.RETRY_WAIT
     assert delivery.next_attempt_at == expected_retry_at

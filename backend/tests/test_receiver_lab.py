@@ -57,7 +57,8 @@ async def test_receiver_can_rate_limit_twice_then_recover() -> None:
         requests = (await client.get("/requests?run_id=rate-limit-demo")).json()
 
     assert [response.status_code for response in responses] == [429, 429, 200]
-    assert [response.headers.get("Retry-After") for response in responses] == ["2", "2", None]
+    assert [response.headers.get("Retry-After") for response in responses] == ["5", "5", None]
+    assert all("retry after 5 seconds" in response.json()["detail"] for response in responses[:2])
     assert [item["response_status_code"] for item in requests["requests"]] == [429, 429, 200]
 
 

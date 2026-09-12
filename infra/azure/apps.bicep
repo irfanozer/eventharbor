@@ -88,8 +88,8 @@ param workerBaseDelaySeconds int = 1
 param workerMaxDelaySeconds int = 2
 
 @minValue(1)
-@description('Accelerated public-demo Retry-After cap in seconds.')
-param workerRetryAfterCapSeconds int = 2
+@description('Public-demo Retry-After cap. Allows the busy receiver to request a visible five-second pause.')
+param workerRetryAfterCapSeconds int = 5
 
 @description('Optional additional resource tags. These override matching standard tag keys.')
 param tags object = {}

@@ -67,7 +67,7 @@ function terminal(delivery: Delivery | undefined): boolean {
 const caseCopy: Record<DemoScenarioId, { title: string; hint: string; expectation: string }> = {
   outage_replay: { title: "Receiver stays offline", hint: "You decide when to resend", expectation: "The test receiver keeps saying unavailable. EventHarbor retries, then stops and keeps the event. You bring the receiver back and approve a resend." },
   transient_recovery: { title: "A temporary outage", hint: "Retries recover automatically", expectation: "The test receiver rejects two attempts, then accepts the next one. EventHarbor retries automatically." },
-  rate_limit_recovery: { title: "The receiver is busy", hint: "Wait before trying again", expectation: "The test receiver asks for a two-second wait twice, then accepts the event. Watch the scheduled retries in the attempt log." },
+  rate_limit_recovery: { title: "The receiver is busy", hint: "Wait 5 seconds before retrying", expectation: "The test receiver asks for a five-second wait twice, then accepts the event. Watch the scheduled retries in the attempt log." },
   permanent_rejection: { title: "A required field is missing", hint: "Stop instead of retrying", expectation: "This sample deliberately leaves out a required field. The receiver rejects it, and EventHarbor stops instead of sending the same invalid data again." },
 };
 

@@ -56,7 +56,7 @@ case keeps the previous result visible until a new event is sent.
 | --- | --- | --- |
 | Receiver remains unavailable | `503` four times, then an approved replay receives `200` | Automatic retries stop at the configured limit. The original delivery and its attempts remain saved; replay creates a separate successful delivery. |
 | Receiver recovers briefly | `503`, `503`, `200` | The original delivery succeeds automatically during its retry window. |
-| Receiver asks us to slow down | `429`, `429`, `200` with `Retry-After: 2` | The worker honors the receiver's delay before retrying. |
+| Receiver asks us to slow down | `429`, `429`, `200` with `Retry-After: 5` | The worker waits at least five seconds after each busy response before retrying. The full case takes about ten seconds, plus processing time. |
 | Receiver rejects invalid data | One `400` identifying the omitted required field | The permanent error is saved immediately without unnecessary retries. |
 
 The local retry delays are intentionally short. They make each scenario finish

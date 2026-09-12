@@ -96,7 +96,7 @@ Each scenario is server owned, reproducible, and isolated by run ID.
 | --- | --- | --- |
 | Destination outage | `503, 503, 503, 503`, restore health, then replay `200` | Stopped and saved plus explicit replay |
 | Brief service outage | `503, 503, 200` | Original delivery recovers automatically |
-| API rate limit | `429, 429, 200`, with `Retry-After: 2` on each `429` | Worker follows receiver backpressure and the original delivery succeeds |
+| API rate limit | `429, 429, 200`, with `Retry-After: 5` on each `429` | Worker follows receiver backpressure and the original delivery succeeds |
 | Invalid request | one `400` | Terminal classification; no pointless retry |
 
 The default destination-outage action runs the complete recovery story from one
@@ -193,7 +193,7 @@ demo:
 | Maximum attempts | 4 | 8 |
 | Base retry delay | 1 second | 10 seconds |
 | Maximum retry delay | 2 seconds | 3,600 seconds |
-| `Retry-After` cap | 2 seconds | 3,600 seconds |
+| `Retry-After` cap | 5 seconds | 3,600 seconds |
 
 This changes how quickly the story unfolds, not the delivery state machine or
 the durability guarantees. Production values must be chosen from measured
