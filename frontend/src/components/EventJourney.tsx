@@ -563,7 +563,7 @@ export function EventJourney({
     : `Current location: ${routeNodes.find((route) => route.node === view.location)?.label ?? "EventHarbor"}.`;
 
   return (
-    <section className="event-journey" id="live-proof" data-tone={view.tone} aria-labelledby="event-journey-title">
+    <section className="event-journey" id="technical-journey" data-tone={view.tone} aria-labelledby="event-journey-title">
       <header className="journey-now" aria-live="polite">
         <div className="journey-now-badge"><span>NOW</span><strong>{view.label}</strong></div>
         <div>

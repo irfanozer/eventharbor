@@ -4,7 +4,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import { getOverview } from "../api";
 
 const navigation = [
-  { to: "/", label: "Control room", end: true },
+  { to: "/", label: "Demo", end: true },
   { to: "/events", label: "Events", end: false },
   { to: "/dead-letters", label: "Stopped deliveries", end: false },
   { to: "/endpoints", label: "Endpoints", end: false },
@@ -21,8 +21,8 @@ export function AppShell() {
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to content</a>
       <header className="masthead">
-        <NavLink className="wordmark" to="/" aria-label="EventHarbor Control Room home">
-          EH<span>/</span> CONTROL ROOM
+        <NavLink className="wordmark" to="/" aria-label="EventHarbor home">
+          EventHarbor<span> / </span><small>Webhook delivery</small>
         </NavLink>
         <nav aria-label="Primary navigation">
           {navigation.map((item) => (
@@ -41,7 +41,7 @@ export function AppShell() {
           aria-live="polite"
         >
           <span className="signal" aria-hidden="true" />
-          {health.isError ? "API unavailable" : health.data ? "API reachable" : "Checking API"}
+          {health.isError ? "Backend unavailable" : health.data ? "Backend connected" : "Connecting…"}
         </div>
       </header>
       <main id="main-content">
@@ -49,8 +49,8 @@ export function AppShell() {
       </main>
       <footer className="site-footer">
         <strong>EventHarbor</strong>
-        <p>Durable webhook delivery, observable failure, controlled recovery.</p>
-        <span>Control Room / local demonstration</span>
+        <p>Keep the event. Follow every delivery.</p>
+        <span>Sample data · real HTTP requests</span>
       </footer>
     </div>
   );

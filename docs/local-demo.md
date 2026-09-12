@@ -37,16 +37,18 @@ Open the Control Room at <http://localhost:3000>.
 ## Run a scenario
 
 1. Choose a receiver test case.
-2. Choose an event contract: `order.paid`, `shipment.dispatched`, or
-   `inventory.threshold_reached`.
-3. Edit the event fields if desired.
-4. Select **Send this event and watch it move**.
-5. Follow the highlighted route and response history until the delivery reaches
-   a terminal state.
+2. Use the ready-made order, or expand **Change the sample event** to edit it
+   or choose a shipment or inventory event.
+3. Select **Send test event**.
+4. See the **Latest delivery status**, then read **What happened to this event**
+   directly below it. Every recorded attempt is visible, with its response, time,
+   and a short explanation. There is no separate click-through walkthrough.
+5. For the long outage, bring the test receiver back online, then separately
+   review and approve the resend. Restoring the receiver does not send anything.
 
-Guided mode completes the outage-recovery sequence automatically after the
-original delivery stops. Manual mode pauses at that boundary so you can bring
-the isolated receiver online and explicitly approve the replay.
+There is one demo flow. Backend retries run automatically, but replay after the
+retry limit always waits for the visitor's explicit approval. Preparing another
+case keeps the previous result visible until a new event is sent.
 
 ### Test cases
 
@@ -58,11 +60,16 @@ the isolated receiver online and explicitly approve the replay.
 | Receiver rejects invalid data | One `400` identifying the omitted required field | The permanent error is saved immediately without unnecessary retries. |
 
 The local retry delays are intentionally short. They make each scenario finish
-quickly without changing the delivery state machine.
+quickly without changing the delivery state machine. The timeline updates as
+attempts are recorded and remains visible when delivery finishes. In-progress
+and unknown outcomes are labeled explicitly. No reading controls pause the
+worker or send requests. A new event replaces the timeline only when it is sent.
 
 ## Inspect the evidence
 
-The Control Room combines several independent views of the same delivery:
+The default view shows the request path, recorded attempts, outcome, and next
+action. Expand **See what happened behind the scenes** for deeper evidence from
+that same event:
 
 - The route highlights whether the event is in the API, PostgreSQL, worker, or
   Receiver Lab stage.
@@ -71,6 +78,10 @@ The Control Room combines several independent views of the same delivery:
   duration, and Receiver Lab receipt.
 - Matching event IDs, delivery IDs, attempt numbers, and body hashes correlate
   EventHarbor's record with what Receiver Lab observed.
+
+Database attempts are durable. Receiver Lab's separate, bounded receipt log is
+temporary and may disappear when that service restarts. Missing receipts are
+not treated as proof that the receiver never got the event.
 
 Use the top navigation for additional detail:
 

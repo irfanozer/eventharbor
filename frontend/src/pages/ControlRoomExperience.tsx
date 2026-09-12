@@ -1,880 +1,292 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-
 import {
-  ensureReceiverLabEndpoint,
-  getDeliveryAttempts,
-  getEndpoint,
-  getEvent,
-  getReceiverLab,
-  publishDemoEvent,
-  replayDelivery,
-  setReceiverLabPreset,
+  ensureReceiverLabEndpoint, getDeliveryAttempts, getEndpoint, getEvent, getReceiverLab,
+  publishDemoEvent, replayDelivery, setReceiverLabPreset,
 } from "../api";
+import { DeliveryStory } from "../components/DeliveryStory";
 import { EventJourney } from "../components/EventJourney";
 import { EventTimeline } from "../components/EventTimeline";
 import { ErrorState } from "../components/QueryState";
 import { ReplayConfirmation } from "../components/ReplayConfirmation";
+import { DEFAULT_DEMO_SCENARIO_ID, DEMO_SCENARIOS, demoScenario, isDemoScenarioId } from "../demoScenarios";
 import {
-  DEFAULT_DEMO_SCENARIO_ID,
-  DEMO_SCENARIOS,
-  demoScenario,
-  isDemoScenarioId,
-} from "../demoScenarios";
-import {
-  DEFAULT_DEMO_EVENT_TYPE,
-  DEMO_EVENT_TYPES,
-  RECEIVER_LAB_BASE_URL,
-  demoEventDefinition,
-  demoEventPayload,
-  demoEventReference,
-  initialDemoEventValues,
-  isCanonicalDemoEndpoint,
-  isDemoEventTypeId,
-  isExpectedSchemaRejection,
+  DEFAULT_DEMO_EVENT_TYPE, DEMO_EVENT_TYPES, demoEventDefinition, demoEventPayload,
+  demoEventReference, initialDemoEventValues, isDemoEventTypeId, isExpectedSchemaRejection,
 } from "../demoEvents";
-import { shortId } from "../format";
-import {
-  runReliabilityTour,
-  type ReliabilityTourProgress,
-  type ReliabilityTourResult,
-} from "../reliabilityTour";
-import type {
-  Delivery,
-  DemoEventPayload,
-  DemoEventTypeId,
-  DemoScenarioId,
-  EventAccepted,
-} from "../types";
+import type { Delivery, DemoEventPayload, DemoEventTypeId, DemoScenarioId } from "../types";
 
-const STORY_EVENT_KEY = "eventharbor.control-room.event-id";
-const STORY_TOUR_KEY = "eventharbor.control-room.tour";
-const STORY_MODE_KEY = "eventharbor.control-room.mode";
-const LOCAL_MAX_ATTEMPTS = 4;
-
-type DemoMode = "guided" | "operator";
-
-interface TourStart {
+const EVENT_KEY = "eventharbor.control-room.event-id";
+const RUN_KEY = "eventharbor.control-room.tour";
+interface Run {
   runId: string;
   eventId?: string;
   replayDeliveryId?: string;
+  endpointId?: string;
   payload: DemoEventPayload;
   scenarioId: DemoScenarioId;
 }
+interface Draft { type: DemoEventTypeId; values: Record<string, string> }
 
-interface EventDraft {
-  type: DemoEventTypeId;
-  values: Record<string, string>;
-}
-
-function draftFromPayload(payload: DemoEventPayload): EventDraft {
-  const definition = demoEventDefinition(payload.type);
-  return {
-    type: payload.type,
-    values: Object.fromEntries(definition.fields.map((field) => {
-      const value = payload.data[field.key];
-      if (field.kind === "money" && typeof value === "number") {
-        return [field.key, (value / 100).toFixed(2)];
-      }
-      return [field.key, value === undefined ? "" : String(value)];
-    })),
-  };
-}
-
-function initialEventDraft(type: DemoEventTypeId = DEFAULT_DEMO_EVENT_TYPE): EventDraft {
-  return { type, values: initialDemoEventValues(type) };
-}
-
-function payloadFromDraft(draft: EventDraft): DemoEventPayload {
-  return demoEventPayload(draft.type, draft.values);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function storedPayload(value: unknown): DemoEventPayload | null {
-  if (isRecord(value) && isDemoEventTypeId(value.type) && isRecord(value.data)) {
-    const validValues = Object.values(value.data).every(
-      (item) => typeof item === "string" || typeof item === "number",
-    );
-    if (validValues) {
-      return {
-        type: value.type,
-        data: value.data as Record<string, string | number>,
-      };
+function restoreRun(): Run | null {
+  try {
+    const run = JSON.parse(sessionStorage.getItem(RUN_KEY) ?? "null") as Run | null;
+    const eventId = sessionStorage.getItem(EVENT_KEY);
+    if (!run) return eventId ? { runId: "", eventId, scenarioId: DEFAULT_DEMO_SCENARIO_ID, payload: { type: DEFAULT_DEMO_EVENT_TYPE, data: {} } } : null;
+    const oldPayload = run.payload as unknown as { order_id?: string; amount_cents?: number };
+    if (oldPayload && typeof oldPayload.order_id === "string" && typeof oldPayload.amount_cents === "number") {
+      run.payload = { type: DEFAULT_DEMO_EVENT_TYPE, data: { order_id: oldPayload.order_id, amount_cents: oldPayload.amount_cents, customer_id: "CUS-MIGRATED", currency: "USD" } };
     }
-  }
-
-  // Migrate a session created by the earlier single-order composer.
-  if (
-    isRecord(value) &&
-    typeof value.order_id === "string" &&
-    typeof value.amount_cents === "number"
-  ) {
-    return {
-      type: DEFAULT_DEMO_EVENT_TYPE,
-      data: {
-        order_id: value.order_id,
-        customer_id: "CUS-MIGRATED",
-        amount_cents: value.amount_cents,
-        currency: "USD",
-      },
-    };
-  }
-  return null;
+    if (typeof run.runId !== "string" ||
+      !isDemoEventTypeId(run.payload?.type) || !run.payload.data || typeof run.payload.data !== "object" ||
+      (run.eventId !== undefined && typeof run.eventId !== "string") ||
+      (run.endpointId !== undefined && typeof run.endpointId !== "string")) return null;
+    return { ...run, eventId: run.eventId ?? eventId ?? undefined, scenarioId: isDemoScenarioId(run.scenarioId) ? run.scenarioId : DEFAULT_DEMO_SCENARIO_ID };
+  } catch { return null; }
 }
-
-function storedTourStart(): TourStart | null {
+function remember(run: Run | null): void {
   try {
-    const raw = sessionStorage.getItem(STORY_TOUR_KEY);
-    if (!raw) return null;
-    const value = JSON.parse(raw) as Partial<TourStart>;
-    const payload = storedPayload(value.payload);
-    if (
-      typeof value.runId !== "string" ||
-      payload === null ||
-      (value.eventId !== undefined && typeof value.eventId !== "string") ||
-      (value.replayDeliveryId !== undefined && typeof value.replayDeliveryId !== "string")
-    ) return null;
-    return {
-      ...value,
-      payload,
-      scenarioId: isDemoScenarioId(value.scenarioId)
-        ? value.scenarioId
-        : DEFAULT_DEMO_SCENARIO_ID,
-    } as TourStart;
-  } catch {
-    return null;
-  }
+    if (run) sessionStorage.setItem(RUN_KEY, JSON.stringify(run));
+    else sessionStorage.removeItem(RUN_KEY);
+    if (run?.eventId) sessionStorage.setItem(EVENT_KEY, run.eventId);
+    else sessionStorage.removeItem(EVENT_KEY);
+    sessionStorage.removeItem("eventharbor.control-room.mode");
+  } catch { /* The current run remains usable if browser storage is unavailable. */ }
 }
-
-function rememberTourStart(tour: TourStart | null): void {
-  try {
-    if (tour) sessionStorage.setItem(STORY_TOUR_KEY, JSON.stringify(tour));
-    else sessionStorage.removeItem(STORY_TOUR_KEY);
-  } catch {
-    // Reload recovery is optional when browser storage is disabled.
-  }
+function freshDraft(type: DemoEventTypeId): Draft { return { type, values: initialDemoEventValues(type) }; }
+function draftFromRun(run: Run): Draft {
+  return { type: run.payload.type, values: Object.fromEntries(demoEventDefinition(run.payload.type).fields.map((field) => {
+    const value = run.payload.data[field.key];
+    return [field.key, field.kind === "money" && typeof value === "number" ? (value / 100).toFixed(2) : String(value ?? "")];
+  })) };
 }
-
-function storedStoryMode(): DemoMode | null {
-  try {
-    const value = sessionStorage.getItem(STORY_MODE_KEY);
-    return value === "guided" || value === "operator" ? value : null;
-  } catch {
-    return null;
-  }
+function terminal(delivery: Delivery | undefined): boolean {
+  return delivery?.status === "delivered" || delivery?.status === "dead_lettered";
 }
-
-function rememberStoryMode(mode: DemoMode | null): void {
-  try {
-    if (mode) sessionStorage.setItem(STORY_MODE_KEY, mode);
-    else sessionStorage.removeItem(STORY_MODE_KEY);
-  } catch {
-    // Actor provenance is best-effort when browser storage is disabled.
-  }
-}
-
-function storedStoryEvent(): string | null {
-  try {
-    return sessionStorage.getItem(STORY_EVENT_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function rememberStoryEvent(eventId: string | null): void {
-  try {
-    if (eventId) sessionStorage.setItem(STORY_EVENT_KEY, eventId);
-    else sessionStorage.removeItem(STORY_EVENT_KEY);
-  } catch {
-    // The live journey still works when browser storage is disabled.
-  }
-}
-
-function latestDelivery(deliveries: Delivery[] | undefined): Delivery | undefined {
-  return deliveries?.reduce<Delivery | undefined>((latest, delivery) => {
-    if (!latest || delivery.replay_generation > latest.replay_generation) return delivery;
-    return latest;
-  }, undefined);
-}
-
-function deliveryAtGeneration(deliveries: Delivery[] | undefined, generation: number): Delivery | undefined {
-  return deliveries?.find((delivery) => delivery.replay_generation === generation);
-}
-
-function waitWithAbort(durationMs: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new Error("The reliability tour was paused."));
-      return;
-    }
-    const onAbort = () => {
-      window.clearTimeout(timer);
-      reject(new Error("The reliability tour was paused."));
-    };
-    const timer = window.setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, durationMs);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
+const caseCopy: Record<DemoScenarioId, { title: string; hint: string; expectation: string }> = {
+  outage_replay: { title: "Receiver stays offline", hint: "You decide when to resend", expectation: "The test receiver keeps saying unavailable. EventHarbor retries, then stops and keeps the event. You bring the receiver back and approve a resend." },
+  transient_recovery: { title: "A temporary outage", hint: "Retries recover automatically", expectation: "The test receiver rejects two attempts, then accepts the next one. EventHarbor retries automatically." },
+  rate_limit_recovery: { title: "The receiver is busy", hint: "Wait before trying again", expectation: "The test receiver asks for a two-second wait twice, then accepts the event. Watch the scheduled retries in the attempt log." },
+  permanent_rejection: { title: "A required field is missing", hint: "Stop instead of retrying", expectation: "This sample deliberately leaves out a required field. The receiver rejects it, and EventHarbor stops instead of sending the same invalid data again." },
+};
 
 export function ControlRoomExperience() {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const requestedEventType = searchParams.get("event_type");
-  const startFreshEvent = searchParams.get("new_event") === "1";
-  const initialEventType = isDemoEventTypeId(requestedEventType)
-    ? requestedEventType
-    : DEFAULT_DEMO_EVENT_TYPE;
-  const initialTour = startFreshEvent ? null : storedTourStart();
-  const queryClient = useQueryClient();
-  const tourAbort = useRef<AbortController | null>(null);
-  const [mode, setMode] = useState<DemoMode>(() => startFreshEvent ? "guided" : storedStoryMode() ?? "guided");
-  const [storyMode, setStoryMode] = useState<DemoMode | null>(() => startFreshEvent ? null : storedStoryMode());
-  const [draftScenarioId, setDraftScenarioId] = useState<DemoScenarioId>(
-    () => initialTour?.scenarioId ?? DEFAULT_DEMO_SCENARIO_ID,
-  );
-  const [restoredTour, setRestoredTour] = useState<TourStart | null>(initialTour);
-  const [eventDraft, setEventDraft] = useState<EventDraft>(
-    () => initialTour ? draftFromPayload(initialTour.payload) : initialEventDraft(initialEventType),
-  );
-  const [storyEventId, setStoryEventId] = useState<string | null>(() => startFreshEvent ? null : storedStoryEvent());
-  const [tourProgress, setTourProgress] = useState<ReliabilityTourProgress | null>(null);
+  const [params, setParams] = useSearchParams();
+  const [initial] = useState(() => {
+    const fresh = params.get("new_event") === "1";
+    const run = fresh ? null : restoreRun();
+    const type = params.get("event_type");
+    return { run, draft: run ? draftFromRun(run) : freshDraft(isDemoEventTypeId(type) ? type : DEFAULT_DEMO_EVENT_TYPE) };
+  });
+  const [run, setRun] = useState<Run | null>(initial.run);
+  const runRef = useRef(run);
+  const [draft, setDraft] = useState(initial.draft);
+  const [caseId, setCaseId] = useState(initial.run?.scenarioId ?? DEFAULT_DEMO_SCENARIO_ID);
   const [replayOpen, setReplayOpen] = useState(false);
-  const [preparingNext, setPreparingNext] = useState(false);
-  const draftScenario = demoScenario(draftScenarioId);
-  const draftDefinition = demoEventDefinition(eventDraft.type);
-
+  const [technicalOpen, setTechnicalOpen] = useState(false);
+  const client = useQueryClient();
+  function saveRun(next: Run | null) { runRef.current = next; setRun(next); remember(next); }
   useEffect(() => {
-    if (!startFreshEvent) return;
-    rememberTourStart(null);
-    rememberStoryEvent(null);
-    rememberStoryMode(null);
-    const consumedParams = new URLSearchParams(searchParams);
-    consumedParams.delete("new_event");
-    setSearchParams(consumedParams, { replace: true });
-  }, [searchParams, setSearchParams, startFreshEvent]);
+    if (params.get("new_event") !== "1") return;
+    saveRun(null);
+    const type = params.get("event_type");
+    setDraft(freshDraft(isDemoEventTypeId(type) ? type : DEFAULT_DEMO_EVENT_TYPE));
+    setCaseId(DEFAULT_DEMO_SCENARIO_ID);
+    setReplayOpen(false);
+    send.reset(); repair.reset(); resend.reset();
+    const next = new URLSearchParams(params);
+    next.delete("new_event");
+    setParams(next, { replace: true });
+  }, [params, setParams]);
 
   const story = useQuery({
-    queryKey: ["event", storyEventId],
-    queryFn: () => getEvent(storyEventId!),
-    enabled: Boolean(storyEventId),
+    queryKey: ["event", run?.eventId], queryFn: () => getEvent(run!.eventId!), enabled: Boolean(run?.eventId),
     refetchInterval: (query) => {
-      const current = latestDelivery(query.state.data?.deliveries);
-      const storedScenarioId = query.state.data?.data.scenario;
-      const queryScenario = demoScenario(
-        isDemoScenarioId(storedScenarioId)
-          ? storedScenarioId
-          : restoredTour?.scenarioId ?? DEFAULT_DEMO_SCENARIO_ID,
-      );
-      if (current?.status === "delivered") return false;
-      if (current?.status === "dead_lettered" && ((storyMode ?? mode) === "operator" || queryScenario.strategy === "terminal")) return false;
-      return 700;
+      if (run?.replayDeliveryId && !query.state.data?.deliveries.some((item) => item.id === run.replayDeliveryId)) return 700;
+      return terminal(query.state.data?.deliveries.reduce<Delivery | undefined>((last, item) =>
+        !last || item.replay_generation > last.replay_generation ? item : last, undefined)) ? false : 700;
     },
   });
-  const storedStoryScenarioId = story.data?.data.scenario;
-  const activeScenarioId = isDemoScenarioId(storedStoryScenarioId)
-    ? storedStoryScenarioId
-    : restoredTour?.scenarioId ?? draftScenarioId;
-  const activeScenario = demoScenario(activeScenarioId);
-  const storyRunId = typeof story.data?.data.run_id === "string" ? story.data.data.run_id : undefined;
-  const activeRunId = restoredTour?.runId ?? storyRunId;
+  useEffect(() => {
+    if (!run || run.runId || !story.data) return;
+    const runId = story.data.data.run_id;
+    if (typeof runId !== "string" || !runId) return;
+    const restored: Run = { ...run, runId, scenarioId: isDemoScenarioId(story.data.data.scenario) ? story.data.data.scenario : DEFAULT_DEMO_SCENARIO_ID,
+      payload: { type: demoEventDefinition(story.data.type).type, data: story.data.data as DemoEventPayload["data"] } };
+    saveRun(restored); setDraft(draftFromRun(restored)); setCaseId(restored.scenarioId);
+  }, [run, story.data]);
+  const original = story.data?.deliveries.find((item) => item.replay_generation === 0);
+  const replay = story.data?.deliveries.filter((item) => item.replay_generation > 0)
+    .sort((a, b) => b.replay_generation - a.replay_generation)[0];
+  const current = replay ?? original;
+  const scenario = demoScenario(isDemoScenarioId(story.data?.data.scenario) ? story.data.data.scenario : run?.scenarioId ?? caseId);
   const receiver = useQuery({
-    queryKey: ["receiver-lab", activeRunId ?? "inactive"],
-    queryFn: () => getReceiverLab(activeRunId),
-    enabled: Boolean(activeRunId),
-    refetchInterval: activeRunId ? 600 : false,
+    queryKey: ["receiver-lab", run?.runId], queryFn: () => getReceiverLab(run!.runId), enabled: Boolean(run?.runId),
+    refetchInterval: run?.runId ? 1500 : false,
   });
+  const originalEvidence = useQuery({
+    queryKey: ["delivery-attempts", original?.id, original?.status, original?.attempt_count],
+    queryFn: () => getDeliveryAttempts(original!.id), enabled: Boolean(original),
+    placeholderData: (previous, query) => query?.queryKey[1] === original?.id ? previous : undefined,
+    refetchInterval: terminal(original) ? false : 500,
+  });
+  const replayEvidence = useQuery({
+    queryKey: ["delivery-attempts", replay?.id, replay?.status, replay?.attempt_count],
+    queryFn: () => getDeliveryAttempts(replay!.id), enabled: Boolean(replay),
+    placeholderData: (previous, query) => query?.queryKey[1] === replay?.id ? previous : undefined,
+    refetchInterval: terminal(replay) ? false : 500,
+  });
+  const endpoint = useQuery({ queryKey: ["endpoint", original?.endpoint_id], queryFn: () => getEndpoint(original!.endpoint_id), enabled: Boolean(original) });
+  // A terminal transition always reads final evidence, even if polling just finished.
+  const originalAttempts = originalEvidence.data?.attempts ?? [];
+  const replayAttempts = replayEvidence.data?.attempts ?? [];
+  const receipts = receiver.data?.requests.filter((item) => item.event_id === run?.eventId) ?? [];
+  const receiverReady = receiver.data?.preset === "success" && !receiver.isError;
+  const rejectedAsExpected = scenario.strategy === "terminal" && isExpectedSchemaRejection(story.data?.type, original, originalAttempts);
 
-  const sourceDelivery = deliveryAtGeneration(story.data?.deliveries, 0);
-  const replayGeneration = deliveryAtGeneration(story.data?.deliveries, 1);
-  const currentDelivery = latestDelivery(story.data?.deliveries);
-  const endpointEvidence = useQuery({
-    queryKey: ["endpoint", sourceDelivery?.endpoint_id],
-    queryFn: () => getEndpoint(sourceDelivery!.endpoint_id),
-    enabled: Boolean(sourceDelivery),
-  });
-  const sourceAttempts = useQuery({
-    queryKey: ["delivery-attempts", sourceDelivery?.id],
-    queryFn: () => getDeliveryAttempts(sourceDelivery!.id),
-    enabled: Boolean(sourceDelivery),
-    refetchInterval: sourceDelivery && !["dead_lettered", "delivered"].includes(sourceDelivery.status) ? 450 : false,
-  });
-  const replayAttempts = useQuery({
-    queryKey: ["delivery-attempts", replayGeneration?.id],
-    queryFn: () => getDeliveryAttempts(replayGeneration!.id),
-    enabled: Boolean(replayGeneration),
-    refetchInterval: replayGeneration && !["dead_lettered", "delivered"].includes(replayGeneration.status) ? 450 : false,
-  });
-
-  const terminalSchemaVerified = Boolean(
-    activeScenario.strategy === "terminal" &&
-    isExpectedSchemaRejection(
-      story.data?.type,
-      sourceDelivery,
-      sourceAttempts.data?.attempts ?? [],
-    ),
-  );
-  const terminalEvidenceNeedsReview = Boolean(
-    activeScenario.strategy === "terminal" &&
-    sourceDelivery?.status === "dead_lettered" &&
-    !sourceAttempts.isPending &&
-    !terminalSchemaVerified,
-  );
-  const storyComplete = Boolean(currentDelivery?.status === "delivered" || terminalSchemaVerified);
-  const storyDeadLettered = currentDelivery?.status === "dead_lettered";
-  const receiverReady = receiver.data?.preset === "success";
-
-  const guidedTour = useMutation<ReliabilityTourResult, Error, TourStart>({
-    mutationFn: async ({ runId, eventId, replayDeliveryId, payload, scenarioId: activeScenarioId }) => {
-      const controller = new AbortController();
-      tourAbort.current?.abort();
-      tourAbort.current = controller;
-      return runReliabilityTour(
-        {
-          getReceiverLab,
-          setReceiverLabPreset,
-          ensureReceiverLabEndpoint,
-          publishDemoEvent,
-          getEvent,
-          getDeliveryAttempts,
-          replayDelivery,
-          wait: waitWithAbort,
-          now: Date.now,
-        },
-        {
-          runId,
-          eventId,
-          replayDeliveryId,
-          payload,
-          scenarioId: activeScenarioId,
-          pollIntervalMs: 350,
-          presentationPauseMs: 550,
-          timeoutMs: 90_000,
-          signal: controller.signal,
-          onProgress: (progress) => {
-            setTourProgress(progress);
-            if (progress.eventId) {
-              rememberStoryEvent(progress.eventId);
-              setStoryEventId(progress.eventId);
-            }
-            const resumable: TourStart = {
-              runId,
-              eventId: progress.eventId ?? eventId,
-              replayDeliveryId,
-              payload,
-              scenarioId: activeScenarioId,
-            };
-            rememberTourStart(resumable);
-            setRestoredTour(resumable);
-            if (progress.event) queryClient.setQueryData(["event", progress.event.id], progress.event);
-          },
-        },
-      );
-    },
-    onSuccess: async (result, variables) => {
-      setTourProgress(result);
-      const resumable: TourStart = {
-        runId: result.runId,
-        eventId: result.eventId ?? variables.eventId,
-        replayDeliveryId: result.replayDeliveryId ?? variables.replayDeliveryId,
-        payload: result.payload ?? variables.payload,
-        scenarioId: result.scenarioId,
-      };
-      rememberTourStart(resumable);
-      setRestoredTour(resumable);
-      if (result.event) queryClient.setQueryData(["event", result.event.id], result.event);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["receiver-lab"] }),
-        queryClient.invalidateQueries({ queryKey: ["events"] }),
-        queryClient.invalidateQueries({ queryKey: ["dead-letters"] }),
-        queryClient.invalidateQueries({ queryKey: ["delivery-attempts"] }),
-      ]);
-    },
-  });
-
-  const runOperatorStory = useMutation<EventAccepted, Error, TourStart>({
-    mutationFn: async (start) => {
-      const scenario = demoScenario(start.scenarioId);
-      await setReceiverLabPreset(scenario.preset, start.runId);
-      const endpoint = await ensureReceiverLabEndpoint(start.payload.type);
-      return publishDemoEvent(
-        endpoint.id,
-        start.runId,
-        `control-room-story-${start.runId}`,
-        start.payload,
-        start.scenarioId,
-      );
-    },
-    onSuccess: async (accepted, start) => {
-      const active: TourStart = { ...start, eventId: accepted.event_id };
-      rememberTourStart(active);
-      setRestoredTour(active);
-      rememberStoryEvent(accepted.event_id);
-      setStoryEventId(accepted.event_id);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["receiver-lab"] }),
-        queryClient.invalidateQueries({ queryKey: ["events"] }),
-      ]);
-    },
-  });
-
-  const restoreReceiverHealth = useMutation({
-    mutationFn: async () => {
-      const receiverState = await getReceiverLab(activeRunId);
-      return receiverState.preset === "success"
-        ? receiverState
-        : setReceiverLabPreset("success", activeRunId);
-    },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["receiver-lab"] });
-    },
-  });
-
-  const approveReplay = useMutation({
-    mutationFn: (deliveryId: string) => replayDelivery(deliveryId),
-    onSuccess: async (accepted) => {
-      setReplayOpen(false);
-      if (restoredTour) {
-        const resumable = { ...restoredTour, replayDeliveryId: accepted.delivery_id };
-        rememberTourStart(resumable);
-        setRestoredTour(resumable);
+  const send = useMutation({
+    mutationFn: async (start: Run) => {
+      let prepared = start;
+      if (!prepared.endpointId) {
+        const selected = demoScenario(prepared.scenarioId);
+        const state = await getReceiverLab(prepared.runId);
+        if (state.preset !== selected.preset) {
+          const configured = await setReceiverLabPreset(selected.preset, prepared.runId);
+          if (configured.preset !== selected.preset) throw new Error("The test receiver did not confirm this case. Please try again.");
+        }
+        const destination = await ensureReceiverLabEndpoint(prepared.payload.type);
+        prepared = { ...prepared, endpointId: destination.id };
+        if (runRef.current?.runId !== start.runId) throw new Error("This event is no longer the active run.");
+        saveRun(prepared);
       }
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["event", storyEventId] }),
-        queryClient.invalidateQueries({ queryKey: ["dead-letters"] }),
-      ]);
+      // A lost acknowledgement reuses the exact payload and key without resetting receiver behavior.
+      const accepted = await publishDemoEvent(prepared.endpointId!, prepared.runId, "control-room-story-" + prepared.runId, prepared.payload, prepared.scenarioId);
+      return { ...prepared, eventId: accepted.event_id };
+    },
+    onSuccess: (accepted) => { if (runRef.current?.runId === accepted.runId) saveRun(accepted); void client.invalidateQueries({ queryKey: ["events"] }); },
+  });
+  const repair = useMutation({
+    mutationFn: async () => {
+      if (!run?.runId) throw new Error("No active receiver to restore.");
+      const state = await getReceiverLab(run.runId);
+      const restored = state.preset === "success" ? state : await setReceiverLabPreset("success", run.runId);
+      if (restored.preset !== "success") throw new Error("The receiver has not confirmed recovery yet.");
+      return { state: restored, runId: run.runId };
+    },
+    onSuccess: ({ state, runId }) => client.setQueryData(["receiver-lab", runId], state),
+  });
+  const resend = useMutation({
+    mutationFn: async () => {
+      if (!run?.runId || !original) throw new Error("No stored delivery to resend.");
+      const accepted = await replayDelivery(original.id, "control-room-replay-" + run.runId);
+      return { ...accepted, runId: run.runId };
+    },
+    onSuccess: async (accepted) => {
+      if (runRef.current?.runId === accepted.runId && runRef.current.eventId === accepted.event_id) {
+        saveRun({ ...runRef.current, replayDeliveryId: accepted.delivery_id });
+        setReplayOpen(false);
+      }
+      await client.invalidateQueries({ queryKey: ["event", accepted.event_id] });
     },
   });
-
-  useEffect(() => () => tourAbort.current?.abort(), []);
-
-  function clearBrowserStory(): void {
-    tourAbort.current?.abort();
-    rememberStoryEvent(null);
-    rememberTourStart(null);
-    rememberStoryMode(null);
-    setRestoredTour(null);
-    setStoryMode(null);
-    setStoryEventId(null);
-    setTourProgress(null);
-    setReplayOpen(false);
-    setPreparingNext(false);
-    guidedTour.reset();
-    runOperatorStory.reset();
-    restoreReceiverHealth.reset();
-    approveReplay.reset();
-  }
-
-  function startGuidedTour(): void {
-    if (guidedTour.isPending) return;
-    const next: TourStart = {
-      runId: crypto.randomUUID(),
-      payload: payloadFromDraft(eventDraft),
-      scenarioId: draftScenarioId,
-    };
-    clearBrowserStory();
-    setMode("guided");
-    setStoryMode("guided");
-    rememberStoryMode("guided");
-    rememberTourStart(next);
-    setRestoredTour(next);
-    guidedTour.mutate(next);
-    window.requestAnimationFrame(() => {
-      document.getElementById("live-proof")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
-  }
-
-  function resumeGuidedTour(): void {
-    const prior = guidedTour.data;
-    if (!prior && !restoredTour) return;
-    guidedTour.mutate({
-      runId: prior?.runId ?? restoredTour!.runId,
-      eventId: prior?.eventId ?? restoredTour?.eventId,
-      replayDeliveryId: prior?.replayDeliveryId ?? restoredTour?.replayDeliveryId,
-      payload: prior?.payload ?? restoredTour?.payload ?? payloadFromDraft(eventDraft),
-      scenarioId: prior?.scenarioId ?? restoredTour?.scenarioId ?? draftScenarioId,
-    });
-  }
-
-  function startOperatorStory(): void {
-    if (runOperatorStory.isPending) return;
-    const next: TourStart = {
-      runId: crypto.randomUUID(),
-      payload: payloadFromDraft(eventDraft),
-      scenarioId: draftScenarioId,
-    };
-    clearBrowserStory();
-    setMode("operator");
-    setStoryMode("operator");
-    rememberStoryMode("operator");
-    rememberTourStart(next);
-    setRestoredTour(next);
-    runOperatorStory.mutate(next);
-    window.requestAnimationFrame(() => {
-      document.getElementById("live-proof")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
-  }
-
-  function prepareAnother(): void {
-    const currentIndex = DEMO_SCENARIOS.findIndex((scenario) => scenario.id === activeScenario.id);
-    const nextScenario = DEMO_SCENARIOS[(currentIndex + 1) % DEMO_SCENARIOS.length];
-    if (nextScenario) setDraftScenarioId(nextScenario.id);
-    setEventDraft(initialEventDraft(eventDraft.type));
-    setPreparingNext(true);
-    window.requestAnimationFrame(() => {
-      document.getElementById("demo-input")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
-  }
-
-  const currentReceiverObservations = receiver.data?.requests.filter(
-    (observation) => observation.event_id === storyEventId,
-  ) ?? [];
-  const destinationRepaired = Boolean(
-    sourceDelivery?.status === "dead_lettered" &&
-    (
-      replayGeneration ||
-      receiverReady ||
-      tourProgress?.phase === "repairing" ||
-      currentReceiverObservations.some((observation) => observation.response_status_code === 200)
-    ),
-  );
-  const receiverControlStatus = !activeRunId
-    ? "idle"
-    : receiver.isPending
-      ? "loading"
-      : receiver.isError
-        ? "unavailable"
-        : "ready";
-  const eventDraftValid = draftDefinition.fields.every((field) => {
-    if (
-      draftScenario.strategy === "terminal" &&
-      field.key === draftDefinition.invalidField
-    ) return true;
-    const value = eventDraft.values[field.key] ?? "";
-    if (field.kind === "money") {
-      const amount = Number.parseFloat(value);
-      return Number.isFinite(amount) && amount > 0;
-    }
-    if (field.kind === "integer") {
-      const number = Number(value);
-      return Number.isInteger(number) && number > 0;
-    }
-    if (field.key === "currency") return value.trim().length === 3;
-    return value.trim().length > 0;
+  const busy = send.isPending || repair.isPending || resend.isPending;
+  const waitingForReplay = Boolean(run?.replayDeliveryId && !replay);
+  const locked = busy || waitingForReplay || Boolean(run && (!run.eventId || !terminal(current)));
+  const definition = demoEventDefinition(draft.type);
+  const activeDefinition = demoEventDefinition(story.data?.type ?? run?.payload.type ?? draft.type);
+  const valid = definition.fields.every((field) => {
+    if (caseId === "permanent_rejection" && field.key === definition.invalidField) return true;
+    const value = draft.values[field.key] ?? "";
+    if (field.kind === "money") return Number.isFinite(Number(value)) && Number(value) > 0;
+    if (field.kind === "integer") return Number.isInteger(Number(value)) && Number(value) > 0;
+    return field.key === "currency" ? value.trim().length === 3 : Boolean(value.trim());
   });
-  const restoredCanResume = Boolean(
-    restoredTour &&
-    !guidedTour.isPending &&
-    (restoredTour.eventId ? story.data && !storyComplete : !storyEventId),
-  );
-  const guidedCanResume = guidedTour.data?.phase === "paused" || restoredCanResume;
-  const guidedFailed = guidedTour.data?.phase === "failed";
-  const activeMessage = tourProgress?.message
-    ?? (storyEventId
-      ? "Reading durable state and independent receiver evidence."
-      : "Ready. The live journey will update only from observed system state.");
-  const journeyStarted = Boolean(
-    guidedTour.isPending ||
-    runOperatorStory.isPending ||
-    storyEventId ||
-    restoredTour,
-  );
-  const journeyLoading = Boolean(
-    guidedTour.isPending ||
-    runOperatorStory.isPending ||
-    (storyEventId && !story.data),
-  );
-  const activeMode = storyMode ?? mode;
-  const runFailed = guidedFailed || guidedTour.isError || runOperatorStory.isError || terminalEvidenceNeedsReview;
-  const formLocked = journeyStarted && !storyComplete && !preparingNext && !runFailed;
-  const activeEventType = isDemoEventTypeId(story.data?.type)
-    ? story.data.type
-    : restoredTour?.payload.type ?? eventDraft.type;
-  const activeDefinition = demoEventDefinition(activeEventType);
-  const activePayload: DemoEventPayload = {
-    type: activeEventType,
-    data: story.data?.data as Record<string, string | number> ?? restoredTour?.payload.data ?? {},
-  };
-  const activeReference = story.data || restoredTour
-    ? demoEventReference(activePayload)
-    : "Accepting event…";
-  const visibleEndpointName = endpointEvidence.data
-    ? isCanonicalDemoEndpoint(endpointEvidence.data.url)
-      ? endpointEvidence.data.name
-      : endpointEvidence.data.url === RECEIVER_LAB_BASE_URL
-        ? "Receiver Lab · legacy generic route"
-        : endpointEvidence.data.name
-    : activeDefinition.destinationName;
-  const journeyActionMessage = storyComplete
-    ? "This completed event stays on screen while you prepare the next failure scenario above."
-    : activeMessage;
+  const payload = demoEventPayload(draft.type, draft.values);
+  const reference = story.data ? demoEventReference({ type: activeDefinition.type, data: story.data.data as DemoEventPayload["data"] }) : run ? demoEventReference(run.payload) : null;
+  function begin() {
+    if (locked || !valid) return;
+    const next = { runId: crypto.randomUUID(), scenarioId: caseId, payload };
+    saveRun(next); send.reset(); repair.reset(); resend.reset(); setReplayOpen(false);
+    send.mutate(next);
+    window.requestAnimationFrame(() => {
+      if (window.matchMedia?.("(max-width: 760px)").matches) {
+        document.getElementById("live-proof")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+  }
+  function prepareNext() {
+    const index = DEMO_SCENARIOS.findIndex((item) => item.id === scenario.id);
+    setCaseId(DEMO_SCENARIOS[(index + 1) % DEMO_SCENARIOS.length]!.id);
+    setDraft(freshDraft(draft.type));
+    document.getElementById("demo-input")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
 
-  return (
-    <>
-      <section className="control-hero" id="demo-input" data-running={formLocked}>
-        <div className="hero-copy">
-          <p className="eyebrow">Live webhook journey · real API, database, and HTTP</p>
-          <h1>Watch EventHarbor save, retry, and recover one webhook.</h1>
-          <p className="lede">
-            Choose a business event and a real Receiver Lab route. EventHarbor stores it in PostgreSQL before
-            a background worker sends the webhook. The receiver&apos;s actual HTTP response drives every status you see.
-          </p>
-          <a className="hero-demo-direction" href="#interactive-demo">
-            <span>
-              <small>Try it yourself</small>
-              <strong className="hero-demo-direction__wide">The interactive demo is on the right</strong>
-              <strong className="hero-demo-direction__narrow">The interactive demo continues below</strong>
-            </span>
-            <i aria-hidden="true">→</i>
-          </a>
-          <div className="plain-flow" aria-label="The event moves from this browser through EventHarbor to Receiver Lab">
-            <span>Browser UI</span><i aria-hidden="true">→</i><strong>Store + deliver</strong><i aria-hidden="true">→</i><span>Receiver Lab</span>
-          </div>
-          <ul className="hero-trust-strip" aria-label="Live demonstration guarantees">
-            <li>Real API call</li><li>Stored before delivery</li><li>Separate receiver service</li><li>Independent receipts</li>
-          </ul>
+  return <div className="simple-demo">
+    <header className="demo-intro">
+      <p className="eyebrow">Reliable messages between services</p>
+      <h1>What if the other service can’t accept your message?</h1>
+      <p>EventHarbor saves it, tries to deliver it, and keeps a record of every attempt. That message is a <strong>webhook</strong>. Try a failure below.</p>
+    </header>
+    <div className="simple-demo-grid">
+      <form className="demo-controls" id="demo-input" onSubmit={(event) => { event.preventDefault(); begin(); }}>
+        <p className="eyebrow">1 / Choose a case</p>
+        <h2>What happens at the receiver?</h2>
+        <div className="simple-case-picker" role="group" aria-label="Receiver incident">
+          {DEMO_SCENARIOS.map((item, index) => <button type="button" key={item.id} disabled={locked} aria-pressed={caseId === item.id} onClick={() => setCaseId(item.id)}>
+            <span className="case-index">0{index + 1}</span><span><strong>{caseCopy[item.id].title}</strong><small>{caseCopy[item.id].hint}</small></span><span aria-hidden="true">{caseId === item.id ? "●" : "○"}</span>
+          </button>)}
         </div>
-
-        <form
-          id="interactive-demo"
-          className="scenario-panel event-composer"
-          aria-labelledby="event-composer-title"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (formLocked) return;
-            if (mode === "guided") startGuidedTour();
-            else startOperatorStory();
-          }}
-        >
-          <div className="composer-topline">
-            <span className="section-index">1 / Choose how the receiver behaves</span>
-            <div className="composer-mode-switch" role="group" aria-label="Demo mode">
-              <button type="button" disabled={formLocked} aria-label="Guided run: automatically demonstrate failure and recovery" aria-pressed={mode === "guided"} onClick={() => setMode("guided")}>Guided run</button>
-              <button type="button" disabled={formLocked} aria-label="Manual controls: you restore receiver health and approve replay" aria-pressed={mode === "operator"} onClick={() => setMode("operator")}>Manual</button>
-            </div>
-          </div>
-          <h2 id="event-composer-title">Choose the failure. Then send the event.</h2>
-
-          {journeyStarted ? (
-            <div className="composer-current-story" data-complete={storyComplete}>
-              <span>{runFailed ? "Previous attempt preserved below" : storyComplete ? "Completed story preserved below" : "Current story running below"}</span>
-              <strong>{activeReference}</strong>
-              <small>{storyComplete || runFailed ? "You can prepare the next event without removing this result." : "Finish or pause this event before replacing it."}</small>
-            </div>
-          ) : null}
-
-          <div className="scenario-picker-intro">
-            <h3>Test cases</h3>
-            <p>Choose one controlled receiver behavior. Each case produces real HTTP responses and stored delivery evidence.</p>
-          </div>
-          <div className="scenario-picker" role="group" aria-label="Receiver incident">
-            {DEMO_SCENARIOS.map((scenario) => (
-              <button
-                type="button"
-                disabled={formLocked}
-                aria-pressed={scenario.id === draftScenarioId}
-                className="scenario-choice"
-                key={scenario.id}
-                onClick={() => setDraftScenarioId(scenario.id)}
-              >
-                <strong>{scenario.label}</strong>
-                <span>{scenario.sequence.map((step) => step.toUpperCase()).join(" → ")}</span>
-              </button>
-            ))}
-          </div>
-
-          <fieldset className="event-composer__payload" disabled={formLocked}>
-            <label className="event-composer__type">
-              <span>Business event type</span>
-              <select
-                value={eventDraft.type}
-                onChange={(event) => {
-                  const nextType = event.target.value;
-                  if (isDemoEventTypeId(nextType)) setEventDraft(initialEventDraft(nextType));
-                }}
-              >
-                {DEMO_EVENT_TYPES.map((definition) => (
-                  <option key={definition.type} value={definition.type}>{definition.type} · {definition.label}</option>
-                ))}
-              </select>
-              <small>{draftDefinition.description}</small>
-            </label>
-
-            <div className="event-composer__destination">
-              <span>Real destination selected by this event type</span>
-              <strong>{draftDefinition.destinationName}</strong>
-              <code>{draftDefinition.destinationUrl}</code>
-              <small>{draftDefinition.destinationPurpose} These are distinct routes in one separate FastAPI service.</small>
-            </div>
-
-            <div className="event-composer__fields">
-              {draftDefinition.fields.map((field) => {
-                const omitted = draftScenario.strategy === "terminal" && field.key === draftDefinition.invalidField;
-                if (omitted) {
-                  return (
-                    <div className="event-field-omitted" key={field.key}>
-                      <span>{field.label}</span>
-                      <strong>Intentionally omitted from the JSON body</strong>
-                      <code>data.{field.key}</code>
-                      <small>{draftDefinition.receiverRequirement}</small>
-                    </div>
-                  );
-                }
-                const value = eventDraft.values[field.key] ?? "";
-                const update = (nextValue: string) => setEventDraft((current) => ({
-                  ...current,
-                  values: { ...current.values, [field.key]: nextValue },
-                }));
-                return (
-                  <label key={field.key}>
-                    <span>{field.label}</span>
-                    {field.kind === "money" ? (
-                      <span className="event-composer__money">
-                        <i aria-hidden="true">$</i>
-                        <input type="number" min="0.01" step="0.01" value={value} onChange={(event) => update(event.target.value)} />
-                      </span>
-                    ) : (
-                      <input
-                        type={field.kind === "integer" ? "number" : "text"}
-                        min={field.kind === "integer" ? 1 : undefined}
-                        step={field.kind === "integer" ? 1 : undefined}
-                        maxLength={field.kind === "text" ? 80 : undefined}
-                        value={value}
-                        onChange={(event) => update(event.target.value)}
-                      />
-                    )}
-                    <small>{field.help}</small>
-                  </label>
-                );
-              })}
-            </div>
+        <p className="case-expectation"><strong>What to expect</strong>{caseCopy[caseId].expectation}</p>
+        <div className="sample-event"><span>Sample event</span><strong>{definition.label}</strong><code>{demoEventReference(payload)}</code></div>
+        {caseId === "permanent_rejection" && <p className="missing-field-note">This sends the sample without <code>data.{definition.invalidField}</code>. That missing field causes the rejection.</p>}
+        <details className="sample-editor">
+          <summary><span><strong>Change the sample event</strong>{" "}<small>Edit the event type and its fields</small></span><span className="sample-editor__icon" aria-hidden="true">+</span></summary>
+          <fieldset disabled={locked}>
+            <p className="demo-fineprint">{locked ? "Editing is paused while this delivery is active. You can change the next event when it finishes." : "Changes apply to your next test event. Nothing is sent until you press Send test event."}</p>
+            <label>Business event type<select value={draft.type} onChange={(event) => { if (isDemoEventTypeId(event.target.value)) setDraft(freshDraft(event.target.value)); }}>{DEMO_EVENT_TYPES.map((item) => <option key={item.type} value={item.type}>{item.label}</option>)}</select></label>
+            <div className="sample-fields">{definition.fields.map((field) => caseId === "permanent_rejection" && field.key === definition.invalidField
+              ? <p className="missing-field-note" key={field.key}>{field.label}: intentionally omitted from the JSON body.</p>
+              : <label key={field.key}>{field.label}<input value={draft.values[field.key] ?? ""} type={field.kind === "text" ? "text" : "number"} min={field.kind === "money" ? ".01" : field.kind === "integer" ? 1 : undefined} step={field.kind === "money" ? ".01" : field.kind === "integer" ? 1 : undefined} maxLength={field.kind === "text" ? 80 : undefined} onChange={(event) => setDraft((previous) => ({ ...previous, values: { ...previous.values, [field.key]: event.target.value } }))} /></label>)}</div>
           </fieldset>
-
-          <div className="receiver-contract" data-terminal={draftScenario.strategy === "terminal"}>
-            <span>{draftScenario.strategy === "terminal" ? "Why this request will be rejected" : "What the real receiver will do"}</span>
-            {draftScenario.strategy === "terminal" ? (
-              <>
-                <strong>The browser sends <code>{eventDraft.type}</code> without <code>data.{draftDefinition.invalidField}</code>.</strong>
-                <ol className="receiver-decision-list">
-                  <li><b>EventHarbor intake · HTTP 202</b><small>The event envelope is valid, so it is stored durably before delivery.</small></li>
-                  <li><b>Receiver Lab · HTTP 400</b><small>Its {eventDraft.type} contract requires {draftDefinition.invalidField}. Retrying the unchanged body cannot fix it.</small></li>
-                </ol>
-              </>
-            ) : (
-              <><strong>{draftScenario.contract}</strong><p><b>Concrete cause</b>{draftScenario.cause}</p></>
-            )}
-            <small>{draftScenario.takeaway}</small>
-          </div>
-          <button className="story-action" type="submit" disabled={formLocked || !eventDraftValid}>
-            <span>{formLocked
-              ? "Current event is still running"
-              : draftScenario.strategy === "terminal"
-                ? `Send without ${draftDefinition.invalidField}`
-                : journeyStarted ? "Send this next event" : "Send this event and watch it move"}</span><span aria-hidden="true">→</span>
-          </button>
-          <small>Synthetic business data. Real API transaction, PostgreSQL state, worker requests, HTTP responses, and receiver receipts.</small>
-        </form>
-      </section>
-
-      {journeyStarted ? (
-        <section className="active-run-banner" aria-label="Active demonstration">
-          <div><p className="eyebrow">Following this event</p><h1>{activeReference}</h1></div>
-          <dl>
-            <div><dt>Event type</dt><dd><code>{activeEventType}</code></dd></div>
-            <div><dt>Destination</dt><dd>{visibleEndpointName}</dd></div>
-            <div><dt>Event</dt><dd><code>{storyEventId ? shortId(storyEventId) : "Accepting…"}</code></dd></div>
-          </dl>
-        </section>
-      ) : null}
-
-      <EventJourney
-        scenario={activeScenario}
-        demoMode={activeMode}
-        tourPhase={tourProgress?.phase ?? null}
-        tourMessage={journeyActionMessage}
-        isStarting={journeyLoading}
-        runId={activeRunId}
-        event={story.data ?? null}
-        endpointName={visibleEndpointName}
-        endpointUrl={endpointEvidence.data?.url ?? activeDefinition.destinationUrl}
-        originalDelivery={sourceDelivery ?? null}
-        replayDelivery={replayGeneration ?? null}
-        originalAttempts={sourceAttempts.data?.attempts ?? []}
-        replayAttempts={replayAttempts.data?.attempts ?? []}
-        receiverObservations={currentReceiverObservations}
-        receiverControlStatus={receiverControlStatus}
-        repairOccurred={destinationRepaired}
-        replayOccurred={Boolean(replayGeneration)}
-        maxAttempts={LOCAL_MAX_ATTEMPTS}
-      >
-        {journeyStarted ? (
-          <>
-            {activeMode === "guided" ? (
-              <>
-                {guidedTour.isPending ? (
-                  <><button className="story-action" type="button" disabled><span>Following live system state…</span><span aria-hidden="true">●</span></button><button className="reliability-abandon" type="button" onClick={() => tourAbort.current?.abort()}>Pause demo</button></>
-                ) : null}
-                {guidedCanResume ? <button className="story-action" type="button" onClick={resumeGuidedTour}><span>Resume from stored evidence</span><span aria-hidden="true">→</span></button> : null}
-                {guidedFailed ? <button className="story-action story-action-repair" type="button" onClick={prepareAnother}><span>Prepare a fresh event</span><span aria-hidden="true">↻</span></button> : null}
-                {storyComplete && !guidedTour.isPending ? <button className="story-action story-action-complete" type="button" onClick={prepareAnother}><span>Set up another failure scenario</span><span aria-hidden="true">↗</span></button> : null}
-              </>
-            ) : (
-              <>
-                {runOperatorStory.isPending || (storyEventId && !storyDeadLettered && !storyComplete) ? <button className="story-action" type="button" disabled><span>Following live system state…</span><span aria-hidden="true">●</span></button> : null}
-                {storyDeadLettered && activeScenario.strategy === "replay" && !receiverReady ? (
-                  <>
-                    <div className="recovery-action-explainer">
-                      <span>Restore the destination&apos;s health</span>
-                      <strong>Only this test receiver changes: HTTP 503 unavailable → HTTP 200 accepting</strong>
-                      <p>The service is reachable but currently unavailable. This simulates it becoming healthy after a restart or deployment. EventHarbor has already made four automatic attempts and saved every failure; this control does not erase or resend anything.</p>
-                    </div>
-                    <button className="story-action story-action-repair" type="button" disabled={restoreReceiverHealth.isPending} onClick={() => restoreReceiverHealth.mutate()}><span>{restoreReceiverHealth.isPending ? "Restoring test receiver health…" : "Restore test receiver health"}</span><span aria-hidden="true">→</span></button>
-                  </>
-                ) : null}
-                {storyDeadLettered && activeScenario.strategy === "replay" && receiverReady && sourceDelivery && !replayGeneration ? (
-                  <>
-                    <div className="recovery-action-explainer" data-restored="true">
-                      <span>Receiver healthy · ready for HTTP 200</span>
-                      <strong>The original event is still stopped, saved, and unchanged.</strong>
-                      <p>EventHarbor does not continue indefinitely after the retry budget. Operator approval controls when the stopped, preserved event is sent again and makes the recovery deliberate and traceable.</p>
-                    </div>
-                    <button className="story-action" type="button" onClick={() => setReplayOpen(true)}><span>Replay the preserved event with EventHarbor</span><span aria-hidden="true">→</span></button>
-                  </>
-                ) : null}
-                {storyComplete ? <button className="story-action story-action-complete" type="button" onClick={prepareAnother}><span>Set up another failure scenario</span><span aria-hidden="true">↗</span></button> : null}
-              </>
-            )}
-            {guidedTour.isError ? <ErrorState error={guidedTour.error} /> : null}
-            {runOperatorStory.isError ? <ErrorState error={runOperatorStory.error} /> : null}
-            {restoreReceiverHealth.isError ? <ErrorState error={restoreReceiverHealth.error} /> : null}
-            {approveReplay.isError ? <ErrorState error={approveReplay.error} /> : null}
-            {story.isError && storyEventId ? <ErrorState error={story.error} retry={() => void story.refetch()} /> : null}
-          </>
-        ) : null}
-      </EventJourney>
-
-      {story.data ? (
-        <details className="technical-evidence journey-postgres-lineage">
-          <summary>View PostgreSQL delivery lineage</summary>
-          <EventTimeline deliveries={story.data.deliveries} />
         </details>
-      ) : null}
+        <button className="demo-primary" type="submit" disabled={locked || !valid}>{send.isPending ? "Sending…" : locked ? "Follow the current event →" : "Send test event →"}</button>
+        <p className="demo-fineprint">Sample business data. Real requests to a separate test service, not a real customer or fulfillment system.</p>
+        {run && terminal(current) && <p className="demo-fineprint">The last result stays visible until you send another event.</p>}
+      </form>
 
-      {sourceDelivery ? (
-        <ReplayConfirmation
-          open={replayOpen}
-          deliveryId={sourceDelivery.id}
-          busy={approveReplay.isPending}
-          onCancel={() => setReplayOpen(false)}
-          onConfirm={() => approveReplay.mutate(sourceDelivery.id)}
-        />
-      ) : null}
-      {storyEventId ? <Link className="event-reference control-room-event-link" to={`/events/${storyEventId}`}>Open the complete event record / {shortId(storyEventId)} →</Link> : null}
-    </>
-  );
+      <div className="demo-results">
+        {reference && <div className="active-sample"><div><span>Following this event</span><strong>{reference}</strong></div><span>{activeDefinition.label}</span></div>}
+        <DeliveryStory scenario={scenario} event={story.data ?? null} original={original} replay={replay} originalAttempts={originalAttempts} replayAttempts={replayAttempts} receipts={receipts} receiverReady={receiverReady} starting={send.isPending} reading={Boolean(run?.eventId && story.isPending)} evidenceUnavailable={originalEvidence.isError || replayEvidence.isError}>
+          {run && !run.eventId && !send.isPending && <div className="demo-next-action"><p>The send has not been confirmed. Continue with the same event, without creating a duplicate.</p><button className="demo-primary" type="button" onClick={() => send.mutate(runRef.current!)}>Continue sending this event</button></div>}
+          {original?.status === "dead_lettered" && scenario.strategy === "replay" && !replay && !waitingForReplay && <div className="demo-next-action">
+            {!receiverReady ? <button className="demo-primary" type="button" disabled={busy || receiver.isPending || receiver.isError} onClick={() => repair.mutate()}>{repair.isPending ? "Restoring…" : "1. Bring the test receiver back online"}</button>
+              : <button className="demo-primary" type="button" disabled={busy} onClick={() => setReplayOpen(true)}>2. Review and resend the saved event</button>}
+            <small>{receiverReady ? "A resend is a new delivery of the same stored event." : "This changes only the test receiver. It does not resend the event."}</small>
+          </div>}
+          {waitingForReplay && <p className="demo-fineprint">The resend was accepted. Waiting for its stored delivery…</p>}
+          {terminal(current) && !locked && (current?.status === "delivered" || scenario.strategy !== "replay" || replay) && <div className="demo-next-action">
+            {rejectedAsExpected && <Link className="demo-secondary" to={"/?event_type=" + activeDefinition.type + "&new_event=1"}>Start a corrected event →</Link>}
+            <button className="demo-secondary" type="button" onClick={prepareNext}>Try another case →</button>
+          </div>}
+          {send.isError && <ErrorState error={send.error} />}
+          {repair.isError && <ErrorState error={repair.error} />}
+          {resend.isError && <ErrorState error={resend.error} />}
+          {story.isError && run?.eventId && <ErrorState error={story.error} retry={() => void story.refetch()} />}
+          {receiver.isError && <ErrorState error={receiver.error} retry={() => void receiver.refetch()} />}
+        </DeliveryStory>
+      </div>
+    </div>
+
+    <details className="demo-technical" open={technicalOpen} onToggle={(event) => setTechnicalOpen(event.currentTarget.open)}>
+      <summary><span className="technical-icon" aria-hidden="true">{technicalOpen ? "−" : "+"}</span><span><strong>See what happened behind the scenes</strong><small>Request body, HTTP responses, receiver receipts, and saved delivery history</small></span><span className="technical-toggle">{technicalOpen ? "Hide details" : "Show details"}</span></summary>
+      {technicalOpen && <div className="demo-technical__content">
+        <p>These details come from the same run above. The database keeps the event and delivery attempts. The test receiver’s separate receipt log is temporary and can be cleared by a restart.</p>
+        {run?.eventId && <Link className="demo-secondary" to={"/events/" + run.eventId}>Open the full event record →</Link>}
+        <EventJourney scenario={scenario} demoMode="operator" tourPhase={null} tourMessage="The same recorded event, with its technical details expanded." isStarting={send.isPending} runId={run?.runId} event={story.data ?? null} endpointName={endpoint.data?.name ?? activeDefinition.destinationName} endpointUrl={endpoint.data?.url ?? activeDefinition.destinationUrl} originalDelivery={original ?? null} replayDelivery={replay ?? null} originalAttempts={originalAttempts} replayAttempts={replayAttempts} receiverObservations={receipts} receiverControlStatus={!run ? "idle" : receiver.isError ? "unavailable" : receiver.isPending ? "loading" : "ready"} repairOccurred={Boolean(original?.status === "dead_lettered" && scenario.strategy === "replay" && (receiverReady || replay))} replayOccurred={Boolean(replay)} maxAttempts={4} />
+        {story.data && <EventTimeline deliveries={story.data.deliveries} />}
+      </div>}
+    </details>
+    {original && <ReplayConfirmation open={replayOpen} deliveryId={original.id} busy={resend.isPending} onCancel={() => setReplayOpen(false)} onConfirm={() => { if (!resend.isPending) resend.mutate(); }} />}
+  </div>;
 }
