@@ -17,3 +17,5 @@
   },
   "include": ["src", "vite.config.ts"]
 }
+
+// made a minor change
