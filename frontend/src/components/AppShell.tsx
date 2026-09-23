@@ -50,7 +50,7 @@ export function AppShell() {
       <footer className="site-footer">
         <strong>EventHarbor</strong>
         <p>Keep the event. Follow every delivery.</p>
-        <span>Sample data · real HTTP requests</span>
+        <span>real data · real HTTP requests</span>
       </footer>
     </div>
   );
