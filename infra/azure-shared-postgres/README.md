@@ -1,10 +1,51 @@
-# Current-server PostgreSQL consolidation helper
+# PostgreSQL migration tools
+
+## Current route: both databases directly to the new economy server
+
+The selected route is the [combined two-VM migration](../../docs/economy-migration.md),
+not the earlier database-only move into EventHarbor's old server. Use
+`python3 /app/economy_migrate.py` explicitly for this route. The image's default
+entrypoint remains the historical `migrate.py` helper; do not use that default
+for the combined migration.
+
+`economy_migrate.py` accepts `Inspect`, `Rehearse`, `FinalCopy`, and `Verify`.
+`MIGRATION_PROJECT` selects `eventharbor` or `pulseexchange`, each with its exact
+original source server and its own database and application role. The only
+approved destination is
+`psql-demos-economy-56sjj5b3bl7ro.postgres.database.azure.com` in the new West US 2
+foundation. `scripts/azure-shared-postgres/economy-operator.ps1` supplies protected
+credentials, separate project/phase run IDs, and distinct rehearsal passwords.
+
+Rehearsal creates an absent `<project>_rehearsal` database and role. FinalCopy
+instead requires the foundation's existing project database to be empty, owned
+by `portfolio_admin`, with matching source locale and no existing application
+role or other sessions. It never overwrites or drops a target. Both copies use
+verified private Blob round-trips under `economy-postgres/<project>/<run-id>/`.
+Rehearsal verifies table manifests and Alembic; final verification also requires
+exact sequence state after a complete external source-writer freeze.
+
+Verify both final databases before attaching either VM runtime. Use the separate
+[restored-runtime attachment](../../docs/azure-economy-attach-restored-runtime.md)
+helper, not the fresh-database initializer. Old Container Apps connection URLs
+and deployment secrets are not switched to the new server by these copy tools.
+The original and shared-Container-Apps deployment profiles stay disabled for
+this route. The [hostname](../../docs/azure-economy-runtime-hostname.md) and
+[VM deployment identity](../../docs/azure-economy-oidc.md) steps are separate.
+
+These files do not claim that copy, cutover, or resource retirement is complete.
+Neither copy helper starts applications or automatically retires source servers.
+
+## Historical alternative: current-server consolidation
+
+The remainder of this document describes the superseded database-only route and
+its retained `migrate.py`, `isolate_eventharbor.py`, and Container Apps deployment
+profile. It is reference material, not the selected migration procedure.
 
 This is a deliberately narrow, short-lived PostgreSQL 17 client image. It does not
 run a database server, deploy infrastructure, stop applications, switch URLs or
 GitHub secrets, change EventHarbor ownership, or delete any database or role.
-Keep the existing deployment files unchanged. This helper is not the later VM
-migration and is not evidence that a cloud migration has completed.
+Keep the existing deployment files unchanged. This historical helper does not
+perform the selected VM migration and is not evidence of a completed migration.
 
 Fixed source: `psql-pulseexchange-prod-kj25jhmdlk6ik.postgres.database.azure.com`,
 database `pulseexchange`. Fixed target server:
@@ -149,7 +190,10 @@ References: [PostgreSQL 17 pg_dump](https://www.postgresql.org/docs/17/app-pgdum
 [Container Apps managed identity](https://learn.microsoft.com/en-us/azure/container-apps/managed-identity),
 [Blob container properties](https://learn.microsoft.com/en-us/rest/api/storageservices/get-container-properties).
 
-## Persistent application deployment profile
+## Historical Container Apps deployment profile
+
+Do not enable this profile for the selected VM migration. Its opt-in instructions
+below apply only if the database-only alternative is separately selected again.
 
 `apps.bicep`, `migration.bicep`, and the additive
 `.github/workflows/deploy-shared-postgres.yml` keep the reviewed shared-server

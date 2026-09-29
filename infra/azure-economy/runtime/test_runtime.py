@@ -100,5 +100,187 @@ class EnvironmentValidation(unittest.TestCase):
         self.assertIn("header_up X-Forwarded-For {remote_host}", caddy)
         self.assertIn("proxy_set_header X-Real-IP $remote_addr;", nginx)
 
+class SwapSafety(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import types
+        source = (ROOT / "install.sh").read_text(encoding="utf-8")
+        code = source.split("python3 - <<'ECONOMY_SWAP_PY'\n", 1)[1].split("\nECONOMY_SWAP_PY", 1)[0]
+        cls.swap = types.ModuleType("offline_swap_installer")
+        exec(compile(code, str(ROOT / "install.sh") + ":embedded-swap", "exec"), cls.swap.__dict__)
+
+    def setUp(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        root = Path(self.directory.name)
+        self.swap = type(self).swap
+        self.calls = []
+        self.active = []
+        self.free = 20 * 1024 ** 3
+        self.filesystem = "ext4"
+        self.signature = "swap"
+        self.swapfile = root / "private" / "swapfile"
+        self.unit = root / "bounded.swap"
+        self.policy = root / "policy.conf"
+        self.fstab = root / "fstab"
+        self.fstab.write_text("# fixture only\n")
+        values = {"SWAP_DIRECTORY": self.swapfile.parent, "SWAP_FILE": self.swapfile,
+                  "SWAP_BYTES": 8192, "UNIT": self.unit, "POLICY": self.policy, "FSTAB": self.fstab}
+        for name, value in values.items():
+            fixture = patch.object(self.swap, name, value)
+            fixture.start()
+            self.addCleanup(fixture.stop)
+
+        def command(*args):
+            self.calls.append(args)
+            if args[0] == "swapon":
+                return "\n".join(self.active)
+            if args[0] == "findmnt":
+                return self.filesystem
+            if args[0] == "blkid":
+                return self.signature
+            if args[:3] == ("systemctl", "enable", "--now"):
+                self.active = [str(self.swapfile)]
+            if args == ("sysctl", "-n", "vm.swappiness"):
+                return "10"
+            return ""
+
+        def allocate():
+            self.calls.append(("allocate",))
+            self.swapfile.write_bytes(bytes(self.swap.SWAP_BYTES))
+
+        def write_config(path, text):
+            if not path.exists():
+                path.write_text(text)
+
+        for name, value in (("command", command), ("allocate", allocate),
+                            ("write_configuration", write_config),
+                            ("trusted", lambda path, **kwargs: SimpleNamespace(st_size=path.stat().st_size if path.exists() else 0))):
+            fixture = patch.object(self.swap, name, value)
+            fixture.start()
+            self.addCleanup(fixture.stop)
+        fixture = patch.object(self.swap.shutil, "disk_usage", side_effect=lambda path: SimpleNamespace(free=self.free))
+        fixture.start()
+        self.addCleanup(fixture.stop)
+
+    def test_creates_then_reuses_without_allocating_or_formatting_again(self):
+        self.swap.ensure_swap()
+        self.assertEqual(self.swapfile.stat().st_size, 8192)
+        self.assertEqual(self.policy.read_text(), self.swap.POLICY_TEXT)
+        self.calls.clear()
+        self.swap.ensure_swap()
+        self.assertNotIn(("allocate",), self.calls)
+        self.assertFalse(any(call[0] == "mkswap" for call in self.calls))
+
+    def test_other_active_swap_is_not_replaced(self):
+        self.active = ["/existing/operator-swap"]
+        with self.assertRaises(RuntimeError):
+            self.swap.ensure_swap()
+        self.assertFalse(self.swapfile.exists())
+        self.assertFalse(self.unit.exists())
+
+    def test_existing_fstab_swap_is_not_changed(self):
+        text = "/operator-swap none swap sw 0 0\n"
+        self.fstab.write_text(text)
+        with self.assertRaises(RuntimeError):
+            self.swap.ensure_swap()
+        self.assertEqual(self.fstab.read_text(), text)
+        self.assertEqual(self.calls, [])
+
+    def test_existing_unit_or_policy_is_not_overwritten(self):
+        for path in (self.unit, self.policy):
+            path.write_text("operator-owned configuration")
+            with self.assertRaises(RuntimeError):
+                self.swap.ensure_swap()
+            self.assertEqual(path.read_text(), "operator-owned configuration")
+            self.assertFalse(self.swapfile.exists())
+            path.unlink()
+
+    def test_disk_reserve_and_filesystem_are_required(self):
+        self.free = self.swap.RESERVE_BYTES + self.swap.SWAP_BYTES - 1
+        with self.assertRaises(RuntimeError):
+            self.swap.ensure_swap()
+        self.assertFalse(self.swapfile.exists())
+        self.free = 20 * 1024 ** 3
+        self.filesystem = "btrfs"
+        with self.assertRaises(RuntimeError):
+            self.swap.ensure_swap()
+        self.assertFalse(self.swapfile.exists())
+
+    def test_existing_wrong_size_or_signature_is_not_reformatted(self):
+        self.swapfile.parent.mkdir()
+        self.swapfile.write_bytes(b"existing")
+        with self.assertRaises(RuntimeError):
+            self.swap.ensure_swap()
+        self.assertEqual(self.swapfile.read_bytes(), b"existing")
+        self.swapfile.write_bytes(bytes(self.swap.SWAP_BYTES))
+        self.signature = "ext4"
+        with self.assertRaises(RuntimeError):
+            self.swap.ensure_swap()
+        self.assertFalse(any(call[0] == "mkswap" for call in self.calls))
+
+    def test_postactivation_failure_is_reported(self):
+        from unittest.mock import patch
+        original = self.swap.command
+        def wrong_policy(*args):
+            return "60" if args == ("sysctl", "-n", "vm.swappiness") else original(*args)
+        with patch.object(self.swap, "command", side_effect=wrong_policy), self.assertRaises(RuntimeError):
+            self.swap.ensure_swap()
+
+    def test_permissions_reject_symlinks_hardlinks_wrong_owners_and_modes(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        import stat
+        # Compile a fresh module so this test exercises the real permission guard.
+        namespace = {"__name__": "permission_test"}
+        code = (ROOT / "install.sh").read_text().split("python3 - <<'ECONOMY_SWAP_PY'\n", 1)[1].split("\nECONOMY_SWAP_PY", 1)[0]
+        exec(code, namespace)
+        valid = dict(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0, st_nlink=1)
+        path = Mock()
+        path.lstat.return_value = SimpleNamespace(**valid)
+        namespace["trusted"](path, mode=0o600)
+        for change in ({"st_uid": 1000}, {"st_gid": 1000}, {"st_nlink": 2},
+                       {"st_mode": stat.S_IFLNK | 0o600}, {"st_mode": stat.S_IFREG | 0o666}):
+            path.lstat.return_value = SimpleNamespace(**{**valid, **change})
+            with self.assertRaises(RuntimeError):
+                namespace["trusted"](path, mode=0o600)
+
+    def test_swap_only_mode_exits_before_runtime_writes_and_rejects_unknown_args(self):
+        import os
+        import shutil
+        import subprocess
+        source = (ROOT / "install.sh").read_text()
+        argument_guard = source.split("umask 077\n", 1)[1].split('[[ "$EUID"', 1)[0]
+        early_exit = source.split('if [[ "${1:-}" == "--prepare-swap-only" ]]; then', 1)[1].split("\nfi", 1)[0]
+        script = 'set -euo pipefail\n' + argument_guard + '\nif [[ "${1:-}" == "--prepare-swap-only" ]]; then' + early_exit + '\nfi\nprintf RUNTIME_INSTALL_REACHED'
+        bash = shutil.which("bash")
+        if os.name == "nt":
+            candidate = Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe"
+            bash = str(candidate) if candidate.is_file() else None
+        if not bash:
+            self.skipTest("Bash required for isolated mode parsing; no host setup is executed.")
+        result = subprocess.run([bash, "-c", script, "installer", "--prepare-swap-only"], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("RUNTIME_INSTALL_REACHED", result.stdout)
+        for arguments in (["--unknown"], [""], ["--prepare-swap-only", "extra"]):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([bash, "-c", script, "installer", *arguments], text=True, capture_output=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertNotIn("RUNTIME_INSTALL_REACHED", result.stdout)
+        result = subprocess.run([bash, "-c", script, "installer"], text=True, capture_output=True)
+        self.assertEqual(result.stdout, "RUNTIME_INSTALL_REACHED")
+
+    def test_creation_is_exclusive_and_bounded_and_never_disables_swap(self):
+        import inspect
+        code = (ROOT / "install.sh").read_text().split("python3 - <<'ECONOMY_SWAP_PY'\n", 1)[1].split("\nECONOMY_SWAP_PY", 1)[0]
+        self.assertIn("SWAP_BYTES = 2 * 1024 * 1024 * 1024", code)
+        self.assertIn("os.O_EXCL | os.O_NOFOLLOW", code)
+        self.assertIn("os.fchmod(output.fileno(), 0o600)", code)
+        self.assertNotIn("swapoff", code)
+        self.assertNotIn("unlink(", code)
+        self.assertNotIn("truncate(", code)
+
 if __name__ == "__main__":
     unittest.main()

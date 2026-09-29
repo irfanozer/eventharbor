@@ -7,6 +7,8 @@ on:
       - "infra/azure-economy/**"
       - "scripts/azure-economy/**"
       - "tests/deployment/test_economy*"
+      - "tests/deployment/test_attach_restored_runtime.*"
+      - "tests/deployment/test_update_runtime_hostname.*"
       - "tests/deployment/test_resize_existing_api.ps1"
       - ".github/workflows/azure-economy-checks.yml"
   pull_request:
@@ -14,6 +16,8 @@ on:
       - "infra/azure-economy/**"
       - "scripts/azure-economy/**"
       - "tests/deployment/test_economy*"
+      - "tests/deployment/test_attach_restored_runtime.*"
+      - "tests/deployment/test_update_runtime_hostname.*"
       - "tests/deployment/test_resize_existing_api.ps1"
       - ".github/workflows/azure-economy-checks.yml"
   workflow_dispatch:
@@ -43,6 +47,11 @@ jobs:
       - name: Test database initialization with local mocks
         run: python tests/deployment/test_economy_initializer.py
 
+      - name: Test restored runtime attachment and hostname changes with local mocks
+        run: |
+          python tests/deployment/test_attach_restored_runtime.py
+          python tests/deployment/test_update_runtime_hostname.py
+
       - name: Parse economy PowerShell scripts
         shell: pwsh
         run: |
@@ -56,17 +65,22 @@ jobs:
             }
           }
 
-      - name: Test quota and billing guards with local mocks
+      - name: Test economy controllers with isolated local mocks
         shell: pwsh
-        run: ./tests/deployment/test_economy_preflight.ps1
-
-      - name: Test deployment controller with local mocks
-        shell: pwsh
-        run: ./tests/deployment/test_economy_controller.ps1
-
-      - name: Test existing API resize safeguards with local mocks
-        shell: pwsh
-        run: ./tests/deployment/test_resize_existing_api.ps1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $testFiles = @(
+            'tests/deployment/test_economy_preflight.ps1',
+            'tests/deployment/test_economy_controller.ps1',
+            'tests/deployment/test_resize_existing_api.ps1',
+            'tests/deployment/test_attach_restored_runtime.ps1',
+            'tests/deployment/test_update_runtime_hostname.ps1',
+            'tests/deployment/test_economy_oidc.ps1'
+          )
+          foreach ($testFile in $testFiles) {
+            & (Get-Command pwsh).Source -NoProfile -File $testFile
+            if ($LASTEXITCODE -ne 0) { throw "Offline controller test failed: $testFile" }
+          }
 
       - name: Check runtime shell syntax
         shell: bash

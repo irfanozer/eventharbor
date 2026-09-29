@@ -1,20 +1,20 @@
 # Lower-cost Azure deployment
 
-## Status: prepared separately, not a completed migration
+## Status: selected replacement, cutover still requires verification
 
-This deployment is an alternative to the existing Container Apps deployment. It does not replace or edit `infra/azure`, `scripts/azure`, or the production workflow. The live sites must remain on their current resources until the replacement has passed the checks below.
+This deployment is the selected replacement for the existing Container Apps deployment. Follow the [combined migration runbook](economy-migration.md): both source databases move directly to the new shared server. The new foundation has been provisioned after quota approval, but that is not proof that database copy, application cutover, or source retirement is complete. It does not replace or edit `infra/azure`, `scripts/azure`, or the production workflow.
 
 On September 28, 2026, Azure reported both `Standard_B1s` and `Standard_B2ats_v2` as unavailable to this subscription in East US 2. The regional `standardBasv2Family` quota was zero. Do not run a paid substitute because a free-eligible size is unavailable. Resolve capacity and quota first, then confirm the actual free-service meters in this subscription.
 
-Read-only checks also found both sizes restricted in East US. In West US 2, B2ats_v2 was available without a zone pin but still had zero family quota; B1s remained restricted. No checked region currently clears both requirements.
+Those pre-approval read-only checks also found both sizes restricted in East US. In West US 2, B2ats_v2 was available without a zone pin but initially had zero family quota; B1s remained restricted. These are historical capacity observations, not the current approved quota state.
 
-The practical alternative is **two B2ats_v2 VMs in West US 2**, with explicit acknowledgment that they share one allowance and some compute is paid. This needs four Basv2 quota cores, not B1s access. It is an option, not an automatic paid fallback. No VM has been provisioned.
+The selected layout is **two B2ats_v2 VMs in West US 2**, with explicit acknowledgment that they share one allowance and some compute is paid. Four Basv2 quota cores were approved and the foundation was provisioned in `rg-demos-economy`. This was an explicit choice, not an automatic paid fallback. The templates still retain their distinct-SKU default for other reviewed deployments.
 
 ## What changes
 
 | Workload | Replacement | Reason |
 | --- | --- | --- |
-| EventHarbor | One Ubuntu B2ats_v2 VM with prebuilt application containers | Available as a nonzonal option in West US 2 once quota is approved; no Container Apps environment or load balancer |
+| EventHarbor | One Ubuntu B2ats_v2 VM with prebuilt application containers | Selected nonzonal West US 2 host; no Container Apps environment or load balancer |
 | PulseExchange | One Ubuntu B2ats_v2 VM with prebuilt application containers | Separate application host; its hours share the same allowance as the first host |
 | Both databases | One private PostgreSQL B1ms server, 32 GiB, separate databases and users | Avoids paying for two continuously running database servers |
 | HTTPS | Caddy on each VM, existing Nginx frontend images | Keeps same-origin API and WebSocket behavior, with no paid gateway |

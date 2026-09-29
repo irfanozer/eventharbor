@@ -6,7 +6,7 @@
 
 The observations below were collected September 29, 2026 UTC before the combined migration. Publishing this document does not change a database, secret, deployment, DNS record, or billing allowance.
 
-The selected path is database consolidation first, with the VM migration deferred. It keeps EventHarbor's existing private PostgreSQL server and moves PulseExchange into a separate database on that server. Both sites stay on their current Container Apps hosts while VM quota is pending. Public hostnames, certificates, frontends, and the live Container Apps networking remain in place. Do not delete their load balancers or managed networking to pursue database savings.
+The earlier proposed path was database consolidation first, with the VM migration deferred. It would keep EventHarbor's existing private PostgreSQL server and move PulseExchange into a separate database on that server. Both sites would stay on their Container Apps hosts while VM quota was pending. The remaining sections preserve that historical design, not current execution instructions. Do not delete live load balancers or managed networking to pursue database savings.
 
 Keep the original `infra/azure`, `scripts/azure`, and production workflow files unchanged. Record operational changes separately so the previous layout remains understandable and recoverable. This plan is separate from the new-VM migration in [azure-economy.md](azure-economy.md). Its initializer is guarded for new economy resources and must not be pointed at the existing production server as a shortcut.
 
@@ -22,7 +22,7 @@ The current screenshot showed these **September month-to-date costs, not monthly
 | Virtual Network | $8.76 |
 | DNS | $1.20 |
 
-Database consolidation alone cannot establish the approximately $20 total monthly target. Container Apps and its existing networking continue to accrue charges. The separate VM alternative still needs quota approval, deployment validation, and retirement of superseded resources.
+Database consolidation alone cannot establish the approximately $20 total monthly target. Container Apps and its existing networking continue to accrue charges while retained. The selected VM route now has quota approval, but still requires migration validation and separately approved retirement before its full savings can be established.
 
 East US 2 retail prices checked September 29, 2026 UTC were $0.017 per B1ms compute-hour and $0.115 per provisioned GB-month of PostgreSQL storage. Retiring one 32 GB server corresponds to approximately **$16.09 per 730-hour month** before allowances, discounts, taxes, backup changes, and new traffic: `730 x $0.017 + 32 x $0.115`. This is a list-price comparison, not a guaranteed reduction on the next invoice. Migration overlap adds cost.
 

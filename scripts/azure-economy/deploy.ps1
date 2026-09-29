@@ -291,31 +291,6 @@ config_stat = config.stat()
 if config_stat.st_uid != 0 or stat.S_IMODE(config_stat.st_mode) != 0o600:
     raise SystemExit("runtime.env must be owned by root with mode 0600.")
 
-# Pull by digest and verify the actual image configuration on the target host.
-# Neither image metadata nor root-only environment contents are printed.
-images = []
-for kind in ("backend", "frontend"):
-    image = bundle.get(f"{kind}Image", "")
-    pattern = re.escape(f"ghcr.io/{repository}-{kind}") + r"@sha256:[0-9a-f]{64}"
-    if not re.fullmatch(pattern, image):
-        raise SystemExit("Image is not an allowed immutable project package.")
-    subprocess.run(
-        ["docker", "pull", "--platform", "linux/amd64", image],
-        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        timeout=600,
-    )
-    details = json.loads(subprocess.check_output(
-        ["docker", "image", "inspect", image], stderr=subprocess.DEVNULL, timeout=30
-    ))[0]
-    labels = details.get("Config", {}).get("Labels") or {}
-    if details.get("Os") != "linux" or details.get("Architecture") != "amd64":
-        raise SystemExit("Image architecture is not linux/amd64.")
-    if labels.get("org.opencontainers.image.revision") != revision:
-        raise SystemExit("Image source revision does not match the requested release.")
-    if labels.get("org.opencontainers.image.source") != f"https://github.com/{repository}":
-        raise SystemExit("Image source repository does not match this project.")
-    images.append(image)
-
 base = Path(f"/opt/{app}")
 base.mkdir(mode=0o750, parents=False, exist_ok=True)
 os.chmod(base, 0o750)
@@ -342,6 +317,35 @@ for name, content in decoded.items():
     with target.open("xb") as handle:
         handle.write(content)
     os.chmod(target, 0o640)
+# Prepare the host's burst cushion before even the provenance image pull.
+# This mode must not install or replace active runtime files/maintenance units.
+subprocess.run(["bash", str(stage / "install.sh"), "--prepare-swap-only"], check=True)
+
+# Pull by digest and verify the actual image configuration on the target host.
+# Neither image metadata nor root-only environment contents are printed.
+images = []
+for kind in ("backend", "frontend"):
+    image = bundle.get(f"{kind}Image", "")
+    pattern = re.escape(f"ghcr.io/{repository}-{kind}") + r"@sha256:[0-9a-f]{64}"
+    if not re.fullmatch(pattern, image):
+        raise SystemExit("Image is not an allowed immutable project package.")
+    subprocess.run(
+        ["docker", "pull", "--platform", "linux/amd64", image],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=600,
+    )
+    details = json.loads(subprocess.check_output(
+        ["docker", "image", "inspect", image], stderr=subprocess.DEVNULL, timeout=30
+    ))[0]
+    labels = details.get("Config", {}).get("Labels") or {}
+    if details.get("Os") != "linux" or details.get("Architecture") != "amd64":
+        raise SystemExit("Image architecture is not linux/amd64.")
+    if labels.get("org.opencontainers.image.revision") != revision:
+        raise SystemExit("Image source revision does not match the requested release.")
+    if labels.get("org.opencontainers.image.source") != f"https://github.com/{repository}":
+        raise SystemExit("Image source repository does not match this project.")
+    images.append(image)
+
 subprocess.run(["bash", str(stage / "install.sh")], check=True)
 subprocess.run(
     ["bash", str(runtime / "deploy.sh"), images[0], images[1], str(config)],

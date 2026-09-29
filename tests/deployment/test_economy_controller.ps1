@@ -50,6 +50,18 @@ try {
         $parseErrors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors)
         Assert-Check ($parseErrors.Count -eq 0) "$path does not parse."
+        $controllerText = [IO.File]::ReadAllText($path)
+        $stageIndex = $controllerText.IndexOf('with target.open("xb") as handle:')
+        $prepareIndex = $controllerText.IndexOf('subprocess.run(["bash", str(stage / "install.sh"), "--prepare-swap-only"], check=True)')
+        $pullIndex = $controllerText.IndexOf('["docker", "pull", "--platform", "linux/amd64", image]')
+        $labelsIndex = $controllerText.IndexOf('if labels.get("org.opencontainers.image.source") != f"https://github.com/{repository}":')
+        $installIndex = $controllerText.IndexOf('subprocess.run(["bash", str(stage / "install.sh")], check=True)')
+        Assert-Check ($stageIndex -ge 0 -and $prepareIndex -gt $stageIndex -and $pullIndex -gt $prepareIndex) 'Validated public staging and swap-only preparation must precede the first image pull.'
+        Assert-Check ($labelsIndex -gt $pullIndex -and $installIndex -gt $labelsIndex) 'The active runtime must not be installed until both images pass provenance checks.'
+        $runtimeInstaller = [IO.File]::ReadAllText((Join-Path $controller.Repository 'infra/azure-economy/runtime/install.sh'))
+        $prepareExit = $runtimeInstaller.IndexOf('if [[ "${1:-}" == "--prepare-swap-only" ]]; then')
+        $liveInstall = $runtimeInstaller.IndexOf('install -d -o root -g root -m 0750 "$target"')
+        Assert-Check ($prepareExit -gt $runtimeInstaller.IndexOf('ECONOMY_SWAP_PY') -and $liveInstall -gt $prepareExit) 'Swap-only mode must exit before live runtime installation.'
         $wrapper = $ast.Find({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
