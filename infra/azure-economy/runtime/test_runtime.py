@@ -136,6 +136,69 @@ class EnvironmentValidation(unittest.TestCase):
         self.assertIn("header_up X-Forwarded-For {remote_host}", caddy)
         self.assertIn("proxy_set_header X-Real-IP $remote_addr;", nginx)
 
+class WorkerHealth(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("worker_health", ROOT / "worker-health.py")
+        cls.health = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.health)
+
+    async def test_direct_driver_gets_clean_dsn_and_explicit_full_tls_verification(self):
+        import os
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, Mock, patch
+
+        # URL-encoded credential characters must not be decoded or rewritten.
+        url = "postgresql+asyncpg://app:password%3F%23%26%40@server.postgres.database.azure.com:5432/eventharbor?ssl=verify-full"
+        connection = SimpleNamespace(execute=AsyncMock(), close=AsyncMock())
+        connect = AsyncMock(return_value=connection)
+        process = Mock()
+        process.exists.return_value = True
+        process.read_bytes.return_value = b"python\0-m\0eventharbor.deliveries.worker\0"
+        with (patch.dict(os.environ, {"EVENTHARBOR_DATABASE_URL": url}),
+              patch.dict(sys.modules, {"asyncpg": SimpleNamespace(connect=connect)}),
+              patch.object(self.health, "Path") as path,
+              patch.object(self.health.urllib.request, "urlopen") as urlopen):
+            path.return_value.glob.return_value = [process]
+            await self.health.check()
+        connect.assert_awaited_once_with(
+            "postgresql://app:password%3F%23%26%40@server.postgres.database.azure.com:5432/eventharbor",
+            ssl="verify-full", timeout=3,
+        )
+        connection.execute.assert_awaited_once_with("SELECT 1")
+        connection.close.assert_awaited_once_with(timeout=2)
+        urlopen.assert_called_once_with("http://eventharbor-receiver-prod/health", timeout=3)
+        urlopen.return_value.close.assert_called_once_with()
+
+    async def test_rejects_missing_weak_duplicate_or_unrecognized_query_parameters(self):
+        prefix = "postgresql+asyncpg://app:password@server.postgres.database.azure.com/eventharbor"
+        for suffix in ("", "?ssl=require", "?ssl=disable", "?ssl=", "?sslmode=verify-full",
+                       "?ssl=verify-full&ssl=verify-full", "?ssl=verify-full&ssl=disable",
+                       "?ssl=verify-full&options=anything", "?ssl=verify-full&unexpected",
+                       "?ssl=verify-full#fragment"):
+            with self.subTest(suffix=suffix), self.assertRaises(ValueError):
+                self.health.database_dsn(prefix + suffix)
+        with self.assertRaises(ValueError):
+            self.health.database_dsn(prefix.replace("postgresql+asyncpg", "postgresql") + "?ssl=verify-full")
+
+
+class WorkerHealthErrors(unittest.TestCase):
+    def test_main_returns_failure_without_printing_database_diagnostics(self):
+        import contextlib
+        import io
+        from unittest.mock import AsyncMock, patch
+
+        spec = importlib.util.spec_from_file_location("worker_health_errors", ROOT / "worker-health.py")
+        health = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(health)
+        output = io.StringIO()
+        with (patch.object(health, "check", AsyncMock(side_effect=RuntimeError("secret database diagnostics"))),
+              contextlib.redirect_stdout(output), contextlib.redirect_stderr(output)):
+            self.assertEqual(health.main(), 1)
+        self.assertEqual(output.getvalue(), "")
+
+
 class SwapSafety(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
