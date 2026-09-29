@@ -148,6 +148,26 @@ services:
       retries: 3
       start_period: 30s
 
+  caddy-check:
+    <<: *hardened
+    profiles: [tasks]
+    image: ${CADDY_IMAGE:?official Caddy digest required}
+    platform: linux/amd64
+    restart: "no"
+    network_mode: none
+    mem_limit: 64m
+    cpus: 0.50
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?hostname required}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME contact required}
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /data:size=16m,mode=0700
+      - /config:size=4m,mode=0700
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    command: ["caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+
   caddy:
     <<: *hardened
     image: ${CADDY_IMAGE:?official Caddy digest required}

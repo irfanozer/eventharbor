@@ -58,7 +58,7 @@ run compose --profile tasks config --quiet
 phase=image-pull
 run compose --profile tasks pull --quiet
 phase=caddy-validation
-run compose run --rm --no-deps --name "$job_name" caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+run compose run --rm --no-deps --name "$job_name" caddy-check
 # Failed updates leave this timer disabled until an operator resolves the release.
 run systemctl disable --now eventharbor-maintenance.timer
 if [[ -f "$state/current.env" ]]; then

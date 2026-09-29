@@ -37,12 +37,11 @@ class EnvironmentValidation(unittest.TestCase):
     def test_accepts_tls_private_server_url_and_azure_pre_cutover_hostname(self):
         self.assertEqual(self.read()["PUBLIC_HOSTNAME"], self.values["PUBLIC_HOSTNAME"])
 
-    def test_every_database_consumer_has_system_ca_bundle_and_full_tls_verification(self):
+    def expanded_services(self):
         import json
         import os
         import shutil
         import subprocess
-        from urllib.parse import parse_qs, urlsplit
 
         docker = shutil.which("docker")
         if not docker:
@@ -60,7 +59,44 @@ class EnvironmentValidation(unittest.TestCase):
             env=environment, text=True, capture_output=True, timeout=30,
         )
         self.assertEqual(result.returncode, 0, "Offline Compose configuration expansion failed.")
-        services = json.loads(result.stdout)["services"]
+        return json.loads(result.stdout)["services"]
+
+    def test_caddy_validation_is_isolated_from_running_proxy(self):
+        services = self.expanded_services()
+        check = services["caddy-check"]
+        self.assertEqual(check["image"], services["caddy"]["image"])
+        self.assertEqual(check["profiles"], ["tasks"])
+        self.assertEqual(check["network_mode"], "none")
+        for key in ("networks", "ports", "depends_on", "env_file", "secrets"):
+            self.assertFalse(check.get(key), key)
+        self.assertEqual(set(check["environment"]), {"PUBLIC_HOSTNAME", "ACME_EMAIL"})
+        self.assertEqual(check["command"], [
+            "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
+        ])
+        self.assertEqual(int(check["mem_limit"]), 64 * 1024 * 1024)
+        self.assertEqual(float(check["cpus"]), 0.5)
+        self.assertEqual(check["restart"], "no")
+        self.assertTrue(check["read_only"])
+        self.assertEqual(check["cap_drop"], ["ALL"])
+        self.assertFalse(check.get("cap_add"))
+        self.assertIn("no-new-privileges:true", check["security_opt"])
+        self.assertEqual(set(check["tmpfs"]), {
+            "/tmp:size=16m,mode=1777", "/data:size=16m,mode=0700", "/config:size=4m,mode=0700",
+        })
+        self.assertEqual(len(check["volumes"]), 1)
+        mount = check["volumes"][0]
+        self.assertEqual(mount["type"], "bind")
+        self.assertEqual(mount["target"], "/etc/caddy/Caddyfile")
+        self.assertTrue(mount["read_only"])
+        self.assertEqual(Path(mount["source"]).name, "Caddyfile")
+        deploy = (ROOT / "deploy.sh").read_text()
+        self.assertIn('run compose run --rm --no-deps --name "$job_name" caddy-check', deploy)
+        self.assertNotIn('caddy caddy validate', deploy)
+
+    def test_every_database_consumer_has_system_ca_bundle_and_full_tls_verification(self):
+        from urllib.parse import parse_qs, urlsplit
+
+        services = self.expanded_services()
         database_key = validator.PREFIX + "_DATABASE_URL"
         consumers = {name: service["environment"] for name, service in services.items()
                      if database_key in service.get("environment", {})}
