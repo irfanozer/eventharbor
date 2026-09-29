@@ -72,7 +72,7 @@ class CopySqlIntegration(unittest.TestCase):
         m.require_clients()
         bootstrap = m.Pg(m.Database(HOST, BOOTSTRAP, "postgres", os.environ["PGPASSWORD"]), RUN_ID)
         bootstrap.require_version()
-        self.assertTrue(bootstrap.json("SELECT rolsuper FROM pg_roles WHERE rolname=current_user;"))
+        self.assertTrue(bootstrap.json("SELECT to_json(rolsuper) FROM pg_roles WHERE rolname=current_user;"))
         existing = bootstrap.json("SELECT (SELECT count(*) FROM pg_database WHERE datname IN "
                                   "('fixture_event_source','fixture_pulse_source','eventharbor_rehearsal','pulseexchange_rehearsal','eventharbor','pulseexchange')) + "
                                   "(SELECT count(*) FROM pg_roles WHERE rolname IN "
@@ -160,7 +160,7 @@ class CopySqlIntegration(unittest.TestCase):
                     with self.assertRaises(m.SafeError):
                         foundation_admin.claim_empty_foundation(project, project + "_app", application_password, source.locale())
                     self.assertEqual(foundation_database.json("SELECT count(*) FROM public.fixture_refusal_probe;"), 1)
-                    self.assertFalse(foundation_admin.json("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=" + m.literal(project + "_app") + ");"))
+                    self.assertFalse(foundation_admin.json("SELECT to_json(EXISTS(SELECT 1 FROM pg_roles WHERE rolname=" + m.literal(project + "_app") + "));"))
                     # Explicit cleanup of this test's sole negative-case table,
                     # only on the fixed disposable host. The helper does no cleanup.
                     foundation_database.sql("DROP TABLE public.fixture_refusal_probe;", readonly=False)
@@ -180,7 +180,7 @@ class CopySqlIntegration(unittest.TestCase):
                     print("PG17 empty-foundation refusal, atomic owner transfer and exact copy passed: " + project)
             for app in final_apps:
                 other = "pulseexchange" if app.database.name == "eventharbor" else "eventharbor"
-                self.assertFalse(app.json("SELECT has_database_privilege(current_user," + m.literal(other) + ",'CONNECT');"))
+                self.assertFalse(app.json("SELECT to_json(has_database_privilege(current_user," + m.literal(other) + ",'CONNECT'));"))
                 with self.assertRaises(m.SafeError):
                     economy.EconomyPg(replace(app.database, name=other), RUN_ID).sql("SELECT 1;")
             print("PG17 both final app roles denied cross-database login")
