@@ -24,6 +24,7 @@ x-backend: &backend
   cpus: 0.75
 
 x-app-env: &app-env
+  PGSSLROOTCERT: /etc/ssl/certs/ca-certificates.crt
   EVENTHARBOR_ENVIRONMENT: production
   EVENTHARBOR_DATABASE_URL: ${EVENTHARBOR_DATABASE_URL:?private Azure PostgreSQL URL required}
   EVENTHARBOR_DATABASE_SSL_MODE: verify-full
@@ -79,6 +80,7 @@ services:
     restart: unless-stopped
     mem_limit: 96m
     environment:
+      PGSSLROOTCERT: /etc/ssl/certs/ca-certificates.crt
       EVENTHARBOR_ENVIRONMENT: production
       EVENTHARBOR_DATABASE_URL: ${EVENTHARBOR_DATABASE_URL:?private Azure PostgreSQL URL required}
       EVENTHARBOR_DATABASE_SSL_MODE: verify-full

@@ -37,6 +37,42 @@ class EnvironmentValidation(unittest.TestCase):
     def test_accepts_tls_private_server_url_and_azure_pre_cutover_hostname(self):
         self.assertEqual(self.read()["PUBLIC_HOSTNAME"], self.values["PUBLIC_HOSTNAME"])
 
+    def test_every_database_consumer_has_system_ca_bundle_and_full_tls_verification(self):
+        import json
+        import os
+        import shutil
+        import subprocess
+        from urllib.parse import parse_qs, urlsplit
+
+        docker = shutil.which("docker")
+        if not docker:
+            self.skipTest("Docker Compose required for offline configuration expansion; no containers are started.")
+        self.read()
+        environment = {
+            **os.environ,
+            **self.values,
+            "BACKEND_IMAGE": "ghcr.io/example/backend@sha256:" + "b" * 64,
+            "FRONTEND_IMAGE": "ghcr.io/example/frontend@sha256:" + "c" * 64,
+        }
+        result = subprocess.run(
+            [docker, "compose", "--env-file", str(self.file), "-f", str(ROOT / "compose.yaml"),
+             "--profile", "tasks", "config", "--format", "json"],
+            env=environment, text=True, capture_output=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, "Offline Compose configuration expansion failed.")
+        services = json.loads(result.stdout)["services"]
+        database_key = validator.PREFIX + "_DATABASE_URL"
+        consumers = {name: service["environment"] for name, service in services.items()
+                     if database_key in service.get("environment", {})}
+        self.assertEqual(set(consumers), {"api", "worker", "receiver-lab", "migrate", "maintenance"})
+        for name, values in consumers.items():
+            with self.subTest(service=name):
+                self.assertEqual(values["PGSSLROOTCERT"], "/etc/ssl/certs/ca-certificates.crt")
+                self.assertEqual(parse_qs(urlsplit(values[database_key]).query), {"ssl": ["verify-full"]})
+                self.assertEqual(values["EVENTHARBOR_DATABASE_SSL_MODE"], "verify-full")
+        self.assertIn('ssl="verify-full"', (ROOT / "worker-health.py").read_text())
+        self.assertIn("?ssl=verify-full", (ROOT / "runtime.env.example").read_text())
+
     def test_rejects_wrong_database_and_non_azure_host(self):
         key = validator.PREFIX + "_DATABASE_URL"
         for url in (
