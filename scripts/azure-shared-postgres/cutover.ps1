@@ -146,7 +146,7 @@ function Get-CutoverRevisions($Consumer) {
 }
 function Assert-HealthyRevision($Consumer, [string]$Expected = '') {
     $active = @(Get-CutoverRevisions $Consumer | Where-Object active -EQ $true)
-    if ($active.Count -ne 1 -or $active[0].health -cne 'Healthy' -or $active[0].running -cne 'Running' -or
+    if ($active.Count -ne 1 -or $active[0].health -cne 'Healthy' -or $active[0].running -cnotin @('Running','RunningAtMaxScale') -or
         ($Expected -and $active[0].name -cne $Expected)) { throw 'Expected exactly one healthy current revision.' }
     return $active[0]
 }
@@ -212,7 +212,7 @@ function Start-CutoverApp($Consumer) {
     $deadline = [datetime]::UtcNow.AddMinutes(5)
     do {
         $active = @(Get-CutoverRevisions $Consumer | Where-Object active -EQ $true)
-        if ($active.Count -eq 1 -and $active[0].name -ceq $saved.revision -and $active[0].health -ceq 'Healthy' -and $active[0].running -ceq 'Running') {
+        if ($active.Count -eq 1 -and $active[0].name -ceq $saved.revision -and $active[0].health -ceq 'Healthy' -and $active[0].running -cin @('Running','RunningAtMaxScale')) {
             $journal.started[$Consumer.name] = $saved.revision
             Save-CutoverJournal
             return

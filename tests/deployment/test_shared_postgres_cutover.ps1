@@ -23,7 +23,7 @@ function Assert-Check([bool]$Condition,[string]$Message) {
 }
 function Invoke-FreezeFixture {
     param([string]$TestProject='pulseexchange',[string[]]$Actions=@('Inspect'),[switch]$NoApply,
-          [switch]$Recover,[string]$Fault='',[string]$TestLocation='eastus2')
+          [switch]$Recover,[string]$Fault='',[string]$TestLocation='eastus2',[string]$TestRunning='Running')
     $StateDirectory=New-EconomyPrivateDirectory
     $Project=$TestProject; $SubscriptionId=[guid]$subscription; $Apply=-not $NoApply
     $ConfirmSourceStillAuthoritative=[bool]$Recover
@@ -44,7 +44,7 @@ function Invoke-FreezeFixture {
         $configs[$name]=$configs[$name] | ConvertTo-Json -Depth 100 | ConvertFrom-Json -Depth 100
         $secretValues[$name]=@([pscustomobject]@{name='database-url';value="postgresql+asyncpg://admin:PRIVATE_DATABASE_VALUE@source/$Project"},[pscustomobject]@{name='other';value='PRIVATE_OTHER_VALUE'})
         $resources[$name]=@{id=$id;config=$configs[$name];secrets=@{value=$secretValues[$name]}}
-        $revisions[$name]=[pscustomobject]@{name="$name--profiled";active=$true;health='Healthy';running='Running'}
+        $revisions[$name]=[pscustomobject]@{name="$name--profiled";active=$true;health='Healthy';running=$TestRunning}
     }
     if ($Fault -eq 'foreign') {$configs["$Project-api-prod"].tags.application='other'}
     if ($Fault -eq 'unhealthy') {$revisions["$Project-api-prod"].health='Unhealthy'}
@@ -102,7 +102,7 @@ function Invoke-FreezeFixture {
             switch ($Arguments[2]) {
                 deactivate {$revisions[$name].active=$false}
                 activate {$revisions[$name].active=$true}
-                restart {$revisions[$name].health='Healthy';$revisions[$name].running='Running'}
+                restart {$revisions[$name].health='Healthy';$revisions[$name].running=$TestRunning}
                 default {throw 'Unreviewed revision mutation.'}
             }
             return [pscustomobject]@{name=$revision}
@@ -158,6 +158,10 @@ Assert-Check ($result.Failed -and $result.Operations.Count -eq 0) 'An unhealthy 
 $result=Invoke-FreezeFixture -Actions @('PauseJobs','StopWorker')
 Assert-Check ($result.Failed -and $result.Operations.Count -eq 0) 'Worker stopped before API freeze.'
 $freeze=@('PauseJobs','StopApi','StopWorker')
+foreach ($badRunning in @('Unknown','Stopped','Processing','Degraded','Failed','ScaleTo0')) {
+    $result=Invoke-FreezeFixture -Actions $freeze -TestRunning $badRunning
+    Assert-Check ($result.Failed -and $result.Operations.Count -eq 0) 'An unrecognized or non-running revision was accepted.'
+}
 $result=Invoke-FreezeFixture -Actions $freeze
 Assert-Check (-not $result.Failed -and $result.Operations.Count -eq 2 -and $result.Journal.stopped.Count -eq 2) "Freeze sequence failed: $($result.Failure)"
 $result=Invoke-FreezeFixture -Actions ($freeze+@('StartWorker'))
@@ -171,6 +175,8 @@ foreach ($project in @('eventharbor','pulseexchange')) {
     Assert-Check (-not $result.Failed) "Full freeze/recovery fixture failed: $($result.Failure)"
     Assert-Check ($result.Bodies -eq 2 -and $result.Operations.Count -eq 6 -and -not $result.Journal.jobsPaused) 'Recovery changed unexpected resources or failed to restore scheduling.'
     Assert-Check ($result.Journal.schedule.cronExpression -ceq '0 4 * * *') 'Original schedule was lost.'
+    $result=Invoke-FreezeFixture -TestProject $project -TestRunning RunningAtMaxScale -Actions ($freeze+@('StartWorker','StartApi','ResumeJobs')) -Recover
+    Assert-Check (-not $result.Failed -and $result.Operations.Count -eq 6 -and -not $result.Journal.jobsPaused) 'A healthy max-scale revision failed guarded freeze/recovery.'
 }
 Assert-Check ($tree.ParamBlock.Extent.Text -notmatch 'SwitchSecrets|PublishGitHubSecret') 'Obsolete CA database switching remains callable.'
 Write-Host "PASS $checks source freeze/recovery checks; no Azure or GitHub requests made."
