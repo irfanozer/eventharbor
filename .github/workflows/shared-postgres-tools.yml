@@ -1,0 +1,112 @@
+name: Shared PostgreSQL tools
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/azure-shared-postgres/**"
+      - "scripts/azure-shared-postgres/**"
+      - "tests/deployment/test_shared_postgres*"
+      - "tests/shared_postgres/**"
+      - ".github/workflows/shared-postgres-tools.yml"
+  pull_request:
+    paths:
+      - "infra/azure-shared-postgres/**"
+      - "scripts/azure-shared-postgres/**"
+      - "tests/deployment/test_shared_postgres*"
+      - "tests/shared_postgres/**"
+      - ".github/workflows/shared-postgres-tools.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run offline database-copy safety tests
+        run: |
+          python -m unittest discover -s tests/shared_postgres -p 'test_*.py' -v
+      - name: Parse and test PowerShell controllers without cloud credentials
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem scripts/azure-shared-postgres/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $problems = $null
+            [void][Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$problems)
+            if ($problems.Count) { throw ($problems | Out-String) }
+          }
+          Get-ChildItem tests/deployment/test_shared_postgres*.ps1 | ForEach-Object {
+            & $_.FullName
+            if ($LASTEXITCODE -ne 0) { throw 'An offline controller test failed.' }
+          }
+      - name: Compile the private access foundation without deploying
+        run: |
+          set -euo pipefail
+          az bicep build --file infra/azure-shared-postgres/access.bicep --stdout | python tests/shared_postgres/check_access_template.py
+          az bicep build --file infra/azure-shared-postgres/economy-access.bicep --stdout >/dev/null
+      - name: Verify database copies with real PostgreSQL 17
+        run: |
+          set -euo pipefail
+          docker network create pg-copy-test
+          trap 'docker rm -f pg-copy-test-db >/dev/null 2>&1 || true; docker network rm pg-copy-test >/dev/null 2>&1 || true' EXIT
+          docker build -t pg-copy-tools:test infra/azure-shared-postgres
+          docker run -d --name pg-copy-test-db --network pg-copy-test --network-alias test-db \
+            -e POSTGRES_DB=fixture_bootstrap -e POSTGRES_PASSWORD=disposable-fixture-only postgres:17-bookworm
+          ready=false
+          for attempt in $(seq 1 30); do
+            if docker exec pg-copy-test-db pg_isready -U postgres -d fixture_bootstrap; then ready=true; break; fi
+            sleep 2
+          done
+          test "$ready" = true
+          docker run --rm --network pg-copy-test \
+            -e PGHOST=test-db -e PGPORT=5432 -e PGUSER=postgres -e PGDATABASE=fixture_bootstrap \
+            -e PGPASSWORD=disposable-fixture-only -e PYTHONPATH=/app \
+            -v "$PWD/tests/shared_postgres/integration_sql.py:/tests/integration_sql.py:ro" \
+            --entrypoint python3 pg-copy-tools:test /tests/integration_sql.py
+
+  image:
+    needs: check
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build a separately tagged client image in the existing public package
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: infra/azure-shared-postgres
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/irfanozer/eventharbor-backend:postgres-tools-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.title=EventHarbor PostgreSQL migration tools
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.eventharbor.purpose=shared-postgres-copy
+      - name: Record the immutable tool image
+        env:
+          TOOL_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          printf 'Tools image: `ghcr.io/irfanozer/eventharbor-backend@%s`\n' "$TOOL_DIGEST" >> "$GITHUB_STEP_SUMMARY"

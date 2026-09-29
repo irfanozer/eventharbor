@@ -2,7 +2,9 @@
 
 ## Status and scope
 
-**Guarded plan only. The database consolidation described here has not been executed or verified.** Read-only checks were collected September 29, 2026 UTC. Refresh them before a maintenance window. Publishing this document does not change a database, secret, deployment, DNS record, or billing allowance.
+**Historical database-only alternative, superseded by the combined VM migration.** VM quota was approved on September 28, 2026. The selected route now copies both source databases directly to the new private economy server in West US 2, avoiding an intermediate move into the old EventHarbor server. Follow [the combined migration runbook](economy-migration.md), not the target selection below. Keep this alternative and the original Container Apps templates for future use.
+
+The observations below were collected September 29, 2026 UTC before the combined migration. Publishing this document does not change a database, secret, deployment, DNS record, or billing allowance.
 
 The selected path is database consolidation first, with the VM migration deferred. It keeps EventHarbor's existing private PostgreSQL server and moves PulseExchange into a separate database on that server. Both sites stay on their current Container Apps hosts while VM quota is pending. Public hostnames, certificates, frontends, and the live Container Apps networking remain in place. Do not delete their load balancers or managed networking to pursue database savings.
 
