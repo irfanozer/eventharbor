@@ -154,7 +154,7 @@ class PhaseTests(unittest.TestCase):
             def create_target(self, *args):
                 calls.append("create")
 
-            def sql(self, *args, **kwargs):
+            def analyze_user_tables(self):
                 calls.append("analyze")
 
         class Blob:

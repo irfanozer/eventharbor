@@ -225,7 +225,7 @@ def run(mode, environment):
         phase = "single transaction restore"
         m.native(["pg_restore", "--no-password", "--no-owner", "--no-acl", "--no-tablespaces",
                   "--exit-on-error", "--single-transaction", "--dbname=" + database, str(downloaded)], target.database.env(run_id))
-        target.sql("ANALYZE;", readonly=False)
+        target.analyze_user_tables()
         with target.snapshot() as snapshot:
             m.require_same(expected, target.manifest(snapshot, directory), sequences=final)
         if final:

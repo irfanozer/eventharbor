@@ -134,7 +134,7 @@ class CopySqlIntegration(unittest.TestCase):
                     m.native(["pg_restore", "--no-password", "--no-owner", "--no-acl", "--no-tablespaces",
                               "--exit-on-error", "--single-transaction", "--dbname=" + target_name, str(dump)],
                              target.database.env(RUN_ID))
-                    target.sql("ANALYZE;", readonly=False)
+                    target.analyze_user_tables()
                     with target.snapshot() as snapshot:
                         restored = target.manifest(snapshot, directory)
                     m.require_same(expected, restored, sequences=True)
@@ -166,18 +166,19 @@ class CopySqlIntegration(unittest.TestCase):
                     foundation_database.sql("DROP TABLE public.fixture_refusal_probe;", readonly=False)
                     foundation_admin.claim_empty_foundation(project, project + "_app", application_password, source.locale())
                     final_app = economy.EconomyPg(m.Database(HOST, project, project + "_app", application_password), RUN_ID)
-                    final_apps.append(final_app)
                     self.assertEqual(final_app.json("SELECT to_json(pg_get_userbyid(datdba)::text) FROM pg_database WHERE datname=current_database();"), project + "_app")
                     m.native(["pg_restore", "--no-password", "--no-owner", "--no-acl", "--no-tablespaces",
                               "--exit-on-error", "--single-transaction", "--dbname=" + project, str(dump)], final_app.database.env(RUN_ID))
-                    final_app.sql("ANALYZE;", readonly=False)
+                    final_app.analyze_user_tables()
                     with final_app.snapshot() as snapshot:
                         m.require_same(expected, final_app.manifest(snapshot, directory), sequences=True)
                     final_app.sql("BEGIN; ALTER TABLE public.fixture_events ADD COLUMN owner_ddl_probe integer; ROLLBACK;", readonly=False)
                     self.assertEqual(final_app.json("SELECT rolconnlimit FROM pg_roles WHERE rolname=current_user;"), 12)
                     with self.assertRaises(m.SafeError):
                         foundation_admin.claim_empty_foundation(project, project + "_app", application_password, source.locale())
+                    final_apps.append(final_app)
                     print("PG17 empty-foundation refusal, atomic owner transfer and exact copy passed: " + project)
+            self.assertEqual(len(final_apps), 2, "Both complete final-copy fixtures must pass before isolation checks.")
             for app in final_apps:
                 other = "pulseexchange" if app.database.name == "eventharbor" else "eventharbor"
                 self.assertFalse(app.json("SELECT to_json(has_database_privilege(current_user," + m.literal(other) + ",'CONNECT'));"))

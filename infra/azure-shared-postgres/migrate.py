@@ -248,6 +248,20 @@ class Pg:
                             "FROM public.alembic_version;", snapshot=snapshot)
         return {"tables": table_values, "sequences": sequence_values, "alembic_version": version}
 
+    def analyze_user_tables(self):
+        # Bare ANALYZE also visits catalogs a non-superuser cannot analyze and
+        # emits warnings. Keep strict native diagnostics; select restored app
+        # tables explicitly instead of weakening warning handling.
+        tables = self.json("SELECT coalesce(json_agg(json_build_object('schema',n.nspname,"
+                           "'name',c.relname,'owner',pg_get_userbyid(c.relowner)) "
+                           "ORDER BY n.nspname,c.relname),'[]'::json) FROM pg_class c "
+                           "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE " + USER_SCHEMA
+                           + " AND c.relkind IN ('r','m');")
+        if not tables or any(table["owner"] != self.database.user for table in tables):
+            raise SafeError("Statistics update requires restored user tables owned by the connected application role.")
+        statements = ["ANALYZE " + ident(table["schema"]) + "." + ident(table["name"]) + ";" for table in tables]
+        self.sql("\n".join(statements), readonly=False)
+
     def require_absent(self, database, role):
         present = self.json("SELECT (SELECT count(*) FROM pg_database WHERE datname=" + literal(database)
                             + ") + (SELECT count(*) FROM pg_roles WHERE rolname=" + literal(role) + ");")
@@ -507,7 +521,7 @@ def run(mode, environment):
         native(["pg_restore", "--no-password", "--no-owner", "--no-acl", "--no-tablespaces",
                 "--exit-on-error", "--single-transaction", "--dbname=" + database, str(downloaded_dump)],
                target.database.env(run_id))
-        target.sql("ANALYZE;", readonly=False)
+        target.analyze_user_tables()
         phase = "restored data verification"
         with target.snapshot() as snapshot:
             restored = target.manifest(snapshot, directory)

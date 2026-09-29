@@ -1,5 +1,6 @@
 """Offline regression checks. Never connect to PostgreSQL, Azure or an identity endpoint."""
 
+import ast
 import copy
 from contextlib import contextmanager
 import importlib.util
@@ -35,6 +36,31 @@ MANIFEST = {"tables": [{"schema": "public", "name": "alembic_version", "kind": "
 
 
 class CredentialsAndSqlTests(unittest.TestCase):
+    def test_scalar_boolean_json_requires_postgres_json_encoding(self):
+        pg = m.Pg(m.Database.parse(SOURCE_URL, source=True), "offline-run")
+        for result, expected in ((b"true\n", True), (b"false\n", False)):
+            with patch.object(pg, "sql", return_value=result):
+                self.assertIs(pg.json("SELECT to_json(true);"), expected)
+        for result in (b"t\n", b"f\n"):
+            with patch.object(pg, "sql", return_value=result), self.assertRaises(m.SafeError):
+                pg.json("SELECT true;")
+
+    def test_integration_scalar_boolean_projections_are_json_encoded(self):
+        fixture = ast.parse((ROOT / "tests/shared_postgres/integration_sql.py").read_text(encoding="utf-8"))
+        projections = []
+        for node in ast.walk(fixture):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "json" and node.args):
+                continue
+            prefix = node.args[0]
+            while isinstance(prefix, ast.BinOp) and isinstance(prefix.op, ast.Add):
+                prefix = prefix.left
+            if isinstance(prefix, ast.Constant) and isinstance(prefix.value, str):
+                projections.append(prefix.value.strip())
+        for boolean in ("rolsuper", "EXISTS(", "has_database_privilege("):
+            self.assertEqual(sum(value.startswith("SELECT to_json(" + boolean) for value in projections), 1)
+            self.assertFalse(any(value.startswith("SELECT " + boolean) for value in projections))
+
     def test_fixed_endpoints_and_tls_without_password_arguments(self):
         db = m.Database.parse(SOURCE_URL, source=True)
         self.assertEqual(db.password, "private$source")
@@ -59,6 +85,34 @@ class CredentialsAndSqlTests(unittest.TestCase):
             with patch.object(m.subprocess, "run", return_value=result), self.assertRaises(m.SafeError) as raised:
                 m.native(["psql"], {})
             self.assertNotIn("private", str(raised.exception))
+
+    def test_statistics_update_targets_only_explicit_owned_user_tables(self):
+        pg = m.Pg(m.Database(m.TARGET_HOST, "pulseexchange", "pulseexchange_app", "fixture"), "offline-run")
+        tables = [{"schema": "public", "name": "alembic_version", "owner": "pulseexchange_app"},
+                  {"schema": 'quoted"schema', "name": 'quoted"table', "owner": "pulseexchange_app"}]
+        with patch.object(pg, "json", return_value=tables) as inventory, patch.object(pg, "sql") as execute:
+            pg.analyze_user_tables()
+        self.assertIn(m.USER_SCHEMA, inventory.call_args.args[0])
+        self.assertIn("c.relkind IN ('r','m')", inventory.call_args.args[0])
+        execute.assert_called_once_with('ANALYZE "public"."alembic_version";\nANALYZE "quoted""schema"."quoted""table";', readonly=False)
+
+    def test_statistics_update_refuses_wrong_owner_or_empty_inventory_before_write(self):
+        pg = m.Pg(m.Database(m.TARGET_HOST, "pulseexchange", "pulseexchange_app", "fixture"), "offline-run")
+        for tables in ([], [{"schema": "public", "name": "unexpected", "owner": "another_role"}]):
+            with self.subTest(tables=tables), patch.object(pg, "json", return_value=tables), patch.object(pg, "sql") as execute:
+                with self.assertRaises(m.SafeError):
+                    pg.analyze_user_tables()
+                execute.assert_not_called()
+
+    def test_all_copy_paths_use_scoped_analysis_and_complete_both_fixtures(self):
+        for relative in ("infra/azure-shared-postgres/migrate.py", "infra/azure-shared-postgres/economy_migrate.py",
+                         "tests/shared_postgres/integration_sql.py"):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertNotIn('.sql("ANALYZE;"', source)
+            self.assertIn(".analyze_user_tables()", source)
+        source = (ROOT / "tests/shared_postgres/integration_sql.py").read_text(encoding="utf-8")
+        self.assertLess(source.index("self.assertEqual(len(final_apps), 2"), source.index("for app in final_apps:"))
+        self.assertGreater(source.index("final_apps.append(final_app)"), source.index('self.assertEqual(final_app.json("SELECT rolconnlimit'))
 
     def test_major_version_is_enforced_for_all_clients(self):
         with patch.object(m, "native", return_value=b"pg_dump (PostgreSQL) 17.6\n") as native:
@@ -249,8 +303,7 @@ class PhaseTests(unittest.TestCase):
                 events.append("create")
                 case.assertIn((database, role), m.TARGETS.values())
 
-            def sql(self, query, **options):
-                case.assertEqual(query, "ANALYZE;")
+            def analyze_user_tables(self):
                 events.append("analyze")
 
             def json(self, query):
