@@ -1,7 +1,7 @@
 #requires -Version 7.4
 [CmdletBinding()]
 param(
-    [ValidateSet('Status','CreateJob','Inspect','Rehearse','FinalCopy','Verify')][string]$Action='Status',
+    [ValidateSet('Status','CreateJob','UpdateImage','Inspect','Rehearse','FinalCopy','Verify')][string]$Action='Status',
     [Parameter(Mandatory)][ValidateSet('eventharbor','pulseexchange')][string]$Project,
     [Parameter(Mandatory)][string]$StateDirectory,
     [guid]$SubscriptionId='83099284-9ad4-4140-b8fe-8388b6d98a98',
@@ -111,10 +111,10 @@ function Get-EconomyCopyTargetUrl {
     $password=[uri]::EscapeDataString([string]$credentials.postgresAdministratorPassword)
     return "postgresql+asyncpg://portfolio_admin:$password@${targetHost}:5432/postgres?ssl=verify-full"
 }
-function Get-EconomyCopyJob {
+function Get-EconomyCopyJob([string]$ExpectedImage=$record.image) {
     $job=Invoke-EconomyCopyAzure @('rest','--method','get','--url',(Get-EconomyCopyUrl $jobId))
     if ($job.id -ine $jobId -or $job.tags.purpose -cne 'economy-postgres-copy' -or $job.tags.application -cne $Project -or
-        $job.tags.environment -cne 'prod' -or $job.location -cne 'eastus2' -or $job.properties.provisioningState -cne 'Succeeded' -or
+        $job.tags.environment -cne 'prod' -or $job.location.Replace(' ','').ToLowerInvariant() -cne 'eastus2' -or $job.properties.provisioningState -cne 'Succeeded' -or
         $job.properties.environmentId -ine $environmentId -or $job.properties.configuration.triggerType -cne 'Manual' -or
         $job.properties.configuration.replicaRetryLimit -ne 0 -or $job.properties.configuration.manualTriggerConfig.parallelism -ne 1 -or
         $job.properties.configuration.manualTriggerConfig.replicaCompletionCount -ne 1 -or @($job.properties.template.containers).Count -ne 1) {throw 'Economy copy-job ownership or shape mismatch.'}
@@ -122,20 +122,103 @@ function Get-EconomyCopyJob {
     if ($job.identity.type -cne 'UserAssigned' -or $ids.Count -ne 1 -or $ids[0] -ine $identityId) {throw 'Copy job must use only the existing container-scoped backup identity.'}
     $copy=$job.properties.template.containers[0]
     Assert-EconomyCopyImage $copy.image
-    if ($copy.name -cne 'copy' -or ($copy.command -join '|') -cne 'python3|/app/economy_migrate.py') {throw 'Wrong migration helper command.'}
+    if ($copy.name -cne 'copy' -or ($copy.command -join '|') -cne 'python3|/app/economy_migrate.py' -or
+        ($copy.args -join '|') -cne 'Inspect') {throw 'Wrong migration helper command or stored default mode.'}
+    if ($copy.resources.cpu -ne 0.5 -or $copy.resources.memory -cne '1Gi' -or
+        @((Get-EconomyValue $job.properties.template 'initContainers' @()) | Where-Object {$null -ne $_}).Count -or
+        @((Get-EconomyValue $job.properties.template 'volumes' @()) | Where-Object {$null -ne $_}).Count -or
+        @((Get-EconomyValue $copy 'volumeMounts' @()) | Where-Object {$null -ne $_}).Count -or
+        @((Get-EconomyValue $copy 'probes' @()) | Where-Object {$null -ne $_}).Count) {throw 'Copy-job resource allocation or unsupported attached workload changed.'}
     $secrets=@{SOURCE_DATABASE_URL='source-url';TARGET_ADMIN_DATABASE_URL='target-url';TARGET_APP_PASSWORD='app-password';REHEARSAL_APP_PASSWORD='rehearsal-password'}
     $plain=@{MIGRATION_PROJECT=$Project;BACKUP_STORAGE_ACCOUNT=$storage;BACKUP_CONTAINER=$container;MIGRATION_IDENTITY_CLIENT_ID=$identity.properties.clientId;WRITERS_FROZEN='false';VERIFY_TARGET='final';MIGRATION_RUN_ID=$record.runId}
     if (@($copy.env).Count -ne ($secrets.Count+$plain.Count)) {throw 'Unexpected copy-job environment settings.'}
     foreach ($key in $secrets.Keys) {
         $entry=@($copy.env | Where-Object name -CEQ $key)
-        if ($entry.Count -ne 1 -or $entry[0].secretRef -cne $secrets[$key]) {throw 'Copy-job secret reference mismatch.'}
+        if ($entry.Count -ne 1 -or $entry[0].secretRef -cne $secrets[$key] -or
+            (Get-EconomyValue $entry[0] 'value')) {throw 'Copy-job secret reference mismatch.'}
     }
     foreach ($key in $plain.Keys) {
         $entry=@($copy.env | Where-Object name -CEQ $key)
-        if ($entry.Count -ne 1 -or $entry[0].value -cne $plain[$key]) {throw 'Copy-job project, backup, identity or run marker mismatch.'}
+        if ($entry.Count -ne 1 -or $entry[0].value -cne $plain[$key] -or
+            (Get-EconomyValue $entry[0] 'secretRef')) {throw 'Copy-job project, backup, identity or run marker mismatch.'}
     }
-    if ($copy.image -cne $record.image) {throw 'Copy image differs from the protected job journal.'}
+    if ($copy.image -cne $ExpectedImage) {throw 'Copy image differs from the protected job journal or pending update.'}
     return $job
+}
+function New-EconomyCopyImageTemplate($Job,[string]$NewImage) {
+    # JSON Merge Patch replaces arrays. Preserve the complete reviewed container,
+    # not a name/image-only array which could erase command, env or resources.
+    $copy=$Job.properties.template.containers[0]
+    $secretNames=@('SOURCE_DATABASE_URL','TARGET_ADMIN_DATABASE_URL','TARGET_APP_PASSWORD','REHEARSAL_APP_PASSWORD')
+    $environment=@(foreach ($setting in ($copy.env | Sort-Object name)) {
+        if ($setting.name -cin $secretNames) {[ordered]@{name=$setting.name;secretRef=$setting.secretRef}}
+        else {[ordered]@{name=$setting.name;value=[string]$setting.value}}
+    })
+    return [ordered]@{containers=@([ordered]@{name=$copy.name;image=$NewImage;command=@($copy.command);args=@($copy.args);
+        resources=[ordered]@{cpu=$copy.resources.cpu;memory=$copy.resources.memory};env=$environment})}
+}
+function Complete-EconomyCopyImageUpdate {
+    # A missing/ambiguous PATCH response is not permission to submit it again.
+    # The same action/digest may only reconcile the protected pending intent.
+    $pending=$record.pendingImageUpdate
+    if ($pending.jobId -ine $jobId -or $pending.oldImage -cne $record.image -or $pending.newImage -cne $Image -or
+        $pending.expectedTemplateJson -isnot [string]) {throw 'Pending image-update identity differs. Review protected state before recovery.'}
+    $updated=Get-EconomyCopyJob -ExpectedImage $Image
+    $actual=New-EconomyCopyImageTemplate $updated $Image | ConvertTo-Json -Depth 50 -Compress
+    if ($actual -cne $pending.expectedTemplateJson) {throw 'Updated copy-job template differs from the protected image-only intent.'}
+    $record.image=$Image
+    $record.lastImageUpdateUtc=[datetime]::UtcNow.ToString('o')
+    $record.Remove('pendingImageUpdate')
+    Save-EconomyCopyJournal
+    Write-Host "Verified $Project copy-job image update. Default mode remains Inspect; no execution was started."
+}
+function Update-EconomyCopyImage {
+    Assert-EconomyCopyImage $Image
+    if ($WritersFrozen -or $VerifyRehearsal) {throw 'Execution flags do not apply to UpdateImage.'}
+    Assert-EconomyCopyIdle
+    if ($record.ContainsKey('pendingImageUpdate')) {
+        Complete-EconomyCopyImageUpdate
+        return
+    }
+    $current=Get-EconomyCopyJob
+    if ($Image -ceq $record.image) {
+        Write-Host "The verified $Project copy job already uses the requested image. No changes made."
+        return
+    }
+    $template=New-EconomyCopyImageTemplate $current $Image
+    $record.pendingImageUpdate=@{jobId=$jobId;oldImage=$record.image;newImage=$Image;
+        requestedUtc=[datetime]::UtcNow.ToString('o');expectedTemplateJson=($template | ConvertTo-Json -Depth 50 -Compress)}
+    Save-EconomyCopyJournal
+    try {
+        # No configuration, secrets, identity, location, tags or environment ID
+        # is submitted. Array entries contain only supported writable fields.
+        $null=Send-EconomyCopyBody 'patch' (Get-EconomyCopyUrl $jobId) @{properties=@{template=$template}}
+        Complete-EconomyCopyImageUpdate
+    } catch {
+        throw 'Image update is unconfirmed. The protected pending intent remains; repeat UpdateImage with the same digest only to verify read-back. Do not start a copy or submit another patch manually.'
+    }
+}
+function New-EconomyCopyExecutionTemplate($Job,[string]$Mode,[string]$RunId,[bool]$Frozen,[bool]$Rehearsal) {
+    # Job GET returns a JobTemplate, not a JobExecutionTemplate. Explicitly
+    # project the Start API's fields instead of forwarding null/read-only fields.
+    # Match the CLI's typed YAML execution path without ever loading secrets.
+    $copy=$Job.properties.template.containers[0]
+    $phase=if ($Mode -eq 'Rehearse' -or $Rehearsal) {'rehearsal'} else {'final'}
+    $secretNames=@('SOURCE_DATABASE_URL','TARGET_ADMIN_DATABASE_URL','TARGET_APP_PASSWORD','REHEARSAL_APP_PASSWORD')
+    $environment=@(foreach ($setting in $copy.env) {
+        if ($setting.name -cin $secretNames) {@{name=$setting.name;secretRef=$setting.secretRef}}
+        else {
+            $value=switch -CaseSensitive ($setting.name) {
+                'MIGRATION_RUN_ID' {$RunId+'-'+$phase}
+                'WRITERS_FROZEN' {if ($Frozen) {'true'} else {'false'}}
+                'VERIFY_TARGET' {$phase}
+                default {$setting.value}
+            }
+            @{name=$setting.name;value=[string]$value}
+        }
+    })
+    return @{containers=@(@{name=$copy.name;image=$copy.image;command=@($copy.command);args=@($Mode);
+        resources=@{cpu=$copy.resources.cpu;memory=$copy.resources.memory};env=$environment})}
 }
 function Assert-EconomyCopyIdle {
     # Serialize both projects against the small shared server and backup job.
@@ -196,6 +279,8 @@ if ($Action -eq 'CreateJob') {
 if (-not $journal.projects.ContainsKey($Project)) {throw 'Create this project copy job using its protected journal first.'}
 $record=$journal.projects[$Project]
 if ($record.jobId -ine $jobId -or $record.runId -cnotmatch '^vmcopy-(eh|px)-[0-9]{14}$') {throw 'Project copy journal is invalid.'}
+if ($Action -eq 'UpdateImage') {Update-EconomyCopyImage;return}
+if ($record.ContainsKey('pendingImageUpdate')) {throw 'A protected image update is pending. Reconcile UpdateImage with the same requested digest before using this job.'}
 $job=Get-EconomyCopyJob
 if ($Action -eq 'Status') {
     Invoke-EconomyCopyAzure @('containerapp','job','execution','list','--subscription',"$SubscriptionId",'-g','rg-pulseexchange-prod','-n',$jobName,
@@ -205,14 +290,8 @@ if ($Action -eq 'Status') {
 Assert-EconomyCopyIdle
 if ($Action -eq 'FinalCopy' -and -not $WritersFrozen) {throw 'FinalCopy requires independently verified stopped source writers and -WritersFrozen.'}
 if ($VerifyRehearsal -and $Action -ne 'Verify') {throw 'VerifyRehearsal is only valid for Verify.'}
-$template=$job.properties.template
-$template.containers[0].args=@($Action)
 $phase=if ($Action -eq 'Rehearse' -or $VerifyRehearsal) {'rehearsal'} else {'final'}
-foreach ($setting in $template.containers[0].env) {
-    if ($setting.name -ceq 'MIGRATION_RUN_ID') {$setting.value=$record.runId+'-'+$phase}
-    if ($setting.name -ceq 'WRITERS_FROZEN') {$setting.value=if ($WritersFrozen) {'true'} else {'false'}}
-    if ($setting.name -ceq 'VERIFY_TARGET') {$setting.value=$phase}
-}
+$template=New-EconomyCopyExecutionTemplate $job $Action $record.runId ([bool]$WritersFrozen) ([bool]$VerifyRehearsal)
 $result=Send-EconomyCopyBody 'post' (Get-EconomyCopyUrl $jobId '/start') $template
 if (-not $result.name) {throw 'Execution acceptance is unconfirmed. Inspect job status before retrying.'}
 $record.lastExecution=$result.name;$record.lastAction=$Action;$record.lastPhase=$phase

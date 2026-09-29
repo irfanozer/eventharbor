@@ -17,10 +17,11 @@ $checks=0
 function Assert-Check([bool]$Condition,[string]$Message) {if (-not $Condition) {throw $Message};$script:checks++}
 function Invoke-EconomyOperatorFixture {
     param([string]$TestAction='Status',[string]$TestProject='pulseexchange',[switch]$NoApply,[switch]$Frozen,
-          [switch]$Rehearsal,[string]$Fault='',[scriptblock]$MutateJob,[switch]$NoJournal)
+          [switch]$Rehearsal,[string]$Fault='',[scriptblock]$MutateJob,[switch]$NoJournal,[string]$Pending='')
     $StateDirectory=New-EconomyPrivateDirectory
     $Action=$TestAction;$Project=$TestProject;$SubscriptionId=[guid]$subscription;$Apply=-not $NoApply
     $WritersFrozen=[bool]$Frozen;$VerifyRehearsal=[bool]$Rehearsal;$Image=$imageValue
+    if ($TestAction -eq 'UpdateImage' -and $Fault -ne 'same-image') {$Image='ghcr.io/irfanozer/eventharbor-backend@sha256:'+('e'*64)}
     if ($Fault -eq 'image') {$Image='ghcr.io/irfanozer/eventharbor-backend:latest'}
     $prefix="/subscriptions/$subscription/resourceGroups/"
     $identityResource=$prefix+'rg-demos-db-migration/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-px-pgcopy-prod'
@@ -43,7 +44,6 @@ function Invoke-EconomyOperatorFixture {
     $base=if ($Project -eq 'eventharbor') {'vmcopy-eh-20260929123045'} else {'vmcopy-px-20260929123045'}
     $saved=@{schema=1;subscription=$subscription;snapshotRunId=$snapshot.runId;targetHost=$target;
         projects=@{$Project=@{runId=$base;image=$imageValue;jobId=$jobResource;rehearsalPassword=('C'*64)}}}
-    if (-not $NoJournal) {[IO.File]::WriteAllText((Join-Path $StateDirectory 'economy-copy-jobs.json'),($saved | ConvertTo-Json -Depth 30))}
     $envValues=@(
         @{name='SOURCE_DATABASE_URL';secretRef='source-url'},@{name='TARGET_ADMIN_DATABASE_URL';secretRef='target-url'},
         @{name='TARGET_APP_PASSWORD';secretRef='app-password'},@{name='REHEARSAL_APP_PASSWORD';secretRef='rehearsal-password'},
@@ -54,8 +54,17 @@ function Invoke-EconomyOperatorFixture {
     $job=@{id=$jobResource;location='eastus2';tags=@{purpose='economy-postgres-copy';application=$Project;environment='prod'};
         identity=@{type='UserAssigned';userAssignedIdentities=@{$identityResource=@{}}};properties=@{environmentId=$environmentResource;provisioningState='Succeeded';
             configuration=@{triggerType='Manual';replicaRetryLimit=0;manualTriggerConfig=@{parallelism=1;replicaCompletionCount=1}};
-            template=@{containers=@(@{name='copy';image=$imageValue;command=@('python3','/app/economy_migrate.py');args=@('Inspect');env=$envValues})}}}
+            template=@{containers=@(@{name='copy';image=$imageValue;command=@('python3','/app/economy_migrate.py');args=@('Inspect');env=$envValues;resources=@{cpu=0.5;memory='1Gi'}})}}}
     $job=$job | ConvertTo-Json -Depth 50 | ConvertFrom-Json -Depth 50
+    if ($Pending) {
+        $newImage='ghcr.io/irfanozer/eventharbor-backend@sha256:'+('e'*64)
+        $saved.projects[$Project].pendingImageUpdate=@{jobId=$jobResource;oldImage=$imageValue;newImage=$newImage;
+            requestedUtc='2026-09-29T00:00:00Z';expectedTemplateJson=(New-EconomyCopyImageTemplate $job $newImage | ConvertTo-Json -Depth 50 -Compress)}
+        if ($Pending -eq 'completed') {$job.properties.template.containers[0].image=$newImage}
+        if ($Pending -eq 'wrong-intent') {$saved.projects[$Project].pendingImageUpdate.oldImage=$newImage}
+        if ($Pending -eq 'different-image') {$Image='ghcr.io/irfanozer/eventharbor-backend@sha256:'+('f'*64)}
+    }
+    if (-not $NoJournal) {[IO.File]::WriteAllText((Join-Path $StateDirectory 'economy-copy-jobs.json'),($saved | ConvertTo-Json -Depth 100))}
     if ($MutateJob) {& $MutateJob $job}
     $server=@{id=$prefix+'rg-demos-economy/providers/Microsoft.DBforPostgreSQL/flexibleServers/psql-demos-economy-56sjj5b3bl7ro';fullyQualifiedDomainName=$target;
         administratorLogin='portfolio_admin';version='17';state='Ready';location='westus2';tags=@{costProfile='economy';environment='economy';application='EventHarbor-PulseExchange'};
@@ -76,6 +85,21 @@ function Invoke-EconomyOperatorFixture {
             if ([IO.Path]::GetDirectoryName($path) -ne $StateDirectory) {throw 'Private body escaped its protected directory.'}
             $body=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 100;$bodies.Add($body)
             if ($Fault -eq 'body') {throw 'Safe fixture request failure.'}
+            $method=$Arguments[[array]::IndexOf($Arguments,'--method')+1]
+            if ($method -ceq 'patch') {
+                $intent=Get-Content -LiteralPath (Join-Path $StateDirectory 'economy-copy-jobs.json') -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+                Assert-Check ($intent.projects[$Project].image -ceq $imageValue -and
+                    $intent.projects[$Project].pendingImageUpdate.newImage -ceq $Image) 'Pending intent was not saved before PATCH or old image journal advanced early.'
+                Assert-Check (($body.PSObject.Properties.Name -join '|') -ceq 'properties' -and
+                    ($body.properties.PSObject.Properties.Name -join '|') -ceq 'template' -and
+                    ($body.properties.template.PSObject.Properties.Name -join '|') -ceq 'containers') 'Image update included unrelated settings.'
+                if ($Fault -eq 'patch-failure') {throw 'Safe fixture PATCH failure.'}
+                if ($Fault -ne 'readback-old') {$job.properties.template.containers[0].image=$body.properties.template.containers[0].image}
+                if ($Fault -eq 'readback-updating') {$job.properties.provisioningState='Updating'}
+                if ($Fault -eq 'readback-drift') {$job.properties.template.containers[0].env[4].value='wrong-project'}
+                if ($Fault -eq 'empty-response') {return $null}
+                return $job
+            }
             return [pscustomobject]@{name='economy-copy-execution'}
         }
         if ($Arguments[0] -eq 'postgres') {return $server}
@@ -91,7 +115,7 @@ function Invoke-EconomyOperatorFixture {
             return
         }
         if (($Arguments[0..3] -join ' ') -eq 'containerapp job execution list') {
-            return [pscustomobject]@{name='last-execution';properties=[pscustomobject]@{status=$(if ($Fault -eq 'active') {'Unknown'} else {'Succeeded'})}}
+            return [pscustomobject]@{name='last-execution';properties=[pscustomobject]@{status=$(if ($Fault -eq 'active') {'Unknown'} elseif ($Fault -eq 'running') {'Running'} else {'Succeeded'})}}
         }
         throw 'Unexpected Azure operation; no native process was invoked.'
     }
@@ -114,6 +138,12 @@ $result=Invoke-EconomyOperatorFixture -TestAction CreateJob -NoApply
 Assert-Check (-not $result.Failed -and $result.Calls -eq 0) 'Plan mode made Azure requests.'
 $result=Invoke-EconomyOperatorFixture
 Assert-Check (-not $result.Failed -and $result.Bodies.Count -eq 0) "Status fixture failed: $($result.Failure)"
+$result=Invoke-EconomyOperatorFixture -TestAction Inspect -MutateJob {param($j) $j.location='East US 2'}
+Assert-Check (-not $result.Failed -and $result.Bodies.Count -eq 1) "Azure display-name region was not normalized: $($result.Failure)"
+foreach ($wrongRegion in @('East US','West US 2')) {
+    $result=Invoke-EconomyOperatorFixture -TestAction Inspect -MutateJob {param($j) $j.location=$wrongRegion}
+    Assert-Check ($result.Failed -and $result.Bodies.Count -eq 0) 'An unapproved job region was accepted.'
+}
 foreach ($project in @('eventharbor','pulseexchange')) {
     $result=Invoke-EconomyOperatorFixture -TestAction CreateJob -TestProject $project -NoJournal
     Assert-Check (-not $result.Failed -and $result.Bodies.Count -eq 1) "Creation fixture failed: $($result.Failure)"
@@ -136,9 +166,15 @@ foreach ($mutation in @(
     {param($j) $j.id+='-foreign'}, {param($j) $j.tags.application='other'}, {param($j) $j.properties.configuration.triggerType='Schedule'},
     {param($j) $j.properties.configuration.replicaRetryLimit=1}, {param($j) $j.properties.configuration.manualTriggerConfig.parallelism=2},
     {param($j) $j.properties.template.containers[0].command=@('python3','/app/migrate.py')},
+    {param($j) $j.properties.template.containers[0].args=@('FinalCopy')},
     {param($j) $j.properties.template.containers[0].env[4].value='other'},
     {param($j) $j.properties.template.containers[0].env[6].value='otheraccount'},
     {param($j) $j.properties.template.containers[0].env[0].secretRef='other'},
+    {param($j) $j.properties.template.containers[0].env[0] | Add-Member -NotePropertyName value -NotePropertyValue 'PRIVATE_CONFLICTING_VALUE'},
+    {param($j) $j.properties.template.containers[0].env[4] | Add-Member -NotePropertyName secretRef -NotePropertyValue 'other'},
+    {param($j) $j.properties.template.containers[0].resources.cpu=1},
+    {param($j) $j.properties.template | Add-Member -NotePropertyName initContainers -NotePropertyValue @(@{name='unexpected'})},
+    {param($j) $j.properties.template | Add-Member -NotePropertyName volumes -NotePropertyValue @(@{name='unexpected'})},
     {param($j) $j.properties.provisioningState='Unknown'}
 )) {
     $result=Invoke-EconomyOperatorFixture -MutateJob $mutation
@@ -157,4 +193,68 @@ function Get-Run($Case) {@($Case.Bodies[0].containers[0].env | Where-Object name
 Assert-Check ((Get-Run $rehearse) -cne (Get-Run $final)) 'Rehearsal and final backup paths collide.'
 Assert-Check ((Get-Run $rehearse) -ceq (Get-Run $verifyRehearse)) 'Rehearsal Verify selected the wrong manifest.'
 Assert-Check ((Get-Run $final) -ceq (Get-Run $verifyFinal)) 'Final Verify selected the wrong manifest.'
+$projected=Invoke-EconomyOperatorFixture -TestAction Rehearse -MutateJob {
+    param($j)
+    $j.properties.template | Add-Member -NotePropertyName initContainers -NotePropertyValue $null
+    $j.properties.template | Add-Member -NotePropertyName volumes -NotePropertyValue $null
+    $j.properties.template | Add-Member -NotePropertyName terminationGracePeriodSeconds -NotePropertyValue $null
+    $c=$j.properties.template.containers[0]
+    $c | Add-Member -NotePropertyName imageType -NotePropertyValue 'ContainerImage'
+    $c | Add-Member -NotePropertyName probes -NotePropertyValue $null
+    $c | Add-Member -NotePropertyName volumeMounts -NotePropertyValue $null
+    $c.resources | Add-Member -NotePropertyName ephemeralStorage -NotePropertyValue ''
+    foreach ($setting in $c.env) {
+        if ($setting.PSObject.Properties['secretRef']) {$setting | Add-Member -NotePropertyName value -NotePropertyValue $null}
+        else {$setting | Add-Member -NotePropertyName secretRef -NotePropertyValue $null}
+    }
+}
+Assert-Check (-not $projected.Failed -and $projected.Bodies.Count -eq 1) "GET response projection failed: $($projected.Failure)"
+$projectedBody=$projected.Bodies[0]
+Assert-Check (($projectedBody.PSObject.Properties.Name -join '|') -ceq 'containers') 'Start body includes non-execution template fields.'
+$projectedContainer=$projectedBody.containers[0]
+Assert-Check ((@($projectedContainer.PSObject.Properties.Name | Sort-Object) -join '|') -ceq 'args|command|env|image|name|resources') 'Start container field projection changed.'
+Assert-Check ((@($projectedContainer.resources.PSObject.Properties.Name | Sort-Object) -join '|') -ceq 'cpu|memory') 'Read-only resource properties entered the Start body.'
+foreach ($setting in $projectedContainer.env) {
+    Assert-Check (@($setting.PSObject.Properties.Name).Count -eq 2) 'Start environment entry has null or unexpected extra properties.'
+}
+$result=Invoke-EconomyOperatorFixture -TestAction UpdateImage -NoApply
+Assert-Check (-not $result.Failed -and $result.Calls -eq 0 -and $result.Bodies.Count -eq 0) 'UpdateImage plan mode must make no Azure requests.'
+foreach ($project in @('eventharbor','pulseexchange')) {
+    $result=Invoke-EconomyOperatorFixture -TestAction UpdateImage -TestProject $project
+    Assert-Check (-not $result.Failed -and $result.Bodies.Count -eq 1) "Image update failed: $($result.Failure)"
+    $updated=$result.Journal.projects[$project]
+    Assert-Check ($updated.image.EndsWith(('e'*64)) -and -not $updated.ContainsKey('pendingImageUpdate')) 'Verified image was not committed to the journal.'
+    Assert-Check ($updated.runId -match '^vmcopy-' -and $updated.rehearsalPassword -ceq ('C'*64)) 'Image update changed the run ID or retained credentials.'
+    $copy=$result.Bodies[0].properties.template.containers[0]
+    Assert-Check ((@($copy.PSObject.Properties.Name | Sort-Object) -join '|') -ceq 'args|command|env|image|name|resources') 'Image-only PATCH used an incomplete or overbroad container projection.'
+    Assert-Check (($copy.command -join '|') -ceq 'python3|/app/economy_migrate.py' -and ($copy.args -join '|') -ceq 'Inspect') 'Image update changed the stored helper/default mode.'
+    Assert-Check ($copy.resources.cpu -eq 0.5 -and $copy.resources.memory -ceq '1Gi') 'Image update changed resources.'
+    Assert-Check (@($copy.env | Where-Object secretRef -ErrorAction SilentlyContinue).Count -eq 4) 'Image update did not preserve four secret references.'
+    Assert-Check (@($copy.env | Where-Object name -CEQ 'MIGRATION_RUN_ID')[0].value -notmatch '-(final|rehearsal)$') 'Image update replaced the stored base run ID with an execution phase.'
+    foreach ($setting in $copy.env) {Assert-Check (@($setting.PSObject.Properties.Name).Count -eq 2) 'Image update leaked null/unexpected environment fields.'}
+}
+foreach ($fault in @('image','active','running','same-image')) {
+    $result=Invoke-EconomyOperatorFixture -TestAction UpdateImage -Fault $fault
+    Assert-Check ($result.Bodies.Count -eq 0) 'Invalid, active or already-current image submitted a patch.'
+    Assert-Check ($result.Failed -eq ($fault -ne 'same-image')) 'Image update validation/idempotency result changed.'
+}
+foreach ($fault in @('patch-failure','readback-old','readback-updating','readback-drift')) {
+    $result=Invoke-EconomyOperatorFixture -TestAction UpdateImage -Fault $fault
+    $savedUpdate=$result.Journal.projects.pulseexchange
+    Assert-Check ($result.Failed -and $result.Bodies.Count -eq 1 -and $savedUpdate.image -ceq $imageValue -and
+        $savedUpdate.ContainsKey('pendingImageUpdate')) 'Unconfirmed update must preserve old image and pending intent.'
+}
+$result=Invoke-EconomyOperatorFixture -TestAction UpdateImage -Fault empty-response
+Assert-Check (-not $result.Failed -and $result.Bodies.Count -eq 1 -and $result.Journal.projects.pulseexchange.image.EndsWith(('e'*64))) 'Empty PATCH response must require and accept a successful verified read-back.'
+$result=Invoke-EconomyOperatorFixture -TestAction UpdateImage -Pending completed
+Assert-Check (-not $result.Failed -and $result.Bodies.Count -eq 0 -and $result.Journal.projects.pulseexchange.image.EndsWith(('e'*64)) -and
+    -not $result.Journal.projects.pulseexchange.ContainsKey('pendingImageUpdate')) 'Completed pending update must reconcile read-only, never PATCH again.'
+foreach ($pending in @('old','wrong-intent','different-image')) {
+    $result=Invoke-EconomyOperatorFixture -TestAction UpdateImage -Pending $pending
+    Assert-Check ($result.Failed -and $result.Bodies.Count -eq 0 -and $result.Journal.projects.pulseexchange.image -ceq $imageValue) 'Ambiguous pending update submitted another mutation or advanced the journal.'
+}
+$result=Invoke-EconomyOperatorFixture -TestAction Inspect -Pending completed
+Assert-Check ($result.Failed -and $result.Bodies.Count -eq 0) 'Execution bypassed unresolved image intent.'
+$result=Invoke-EconomyOperatorFixture -TestAction UpdateImage -Frozen
+Assert-Check ($result.Failed -and $result.Bodies.Count -eq 0) 'Execution-only flags were accepted for image update.'
 Write-Host "PASS $checks economy copy operator checks; no Azure calls or real credentials used."
