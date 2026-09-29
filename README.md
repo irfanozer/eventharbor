@@ -164,9 +164,31 @@ and open <http://localhost:5173>.
 
 ## Deployment and operations
 
+Two Azure deployment profiles are retained. The public demo moved to the VM
+profile to reduce hosting cost, not to remove the original Container Apps
+architecture or its deployment automation.
+
+### Current cost-optimized deployment
+
+EventHarbor runs on its own Azure Linux VM with Docker Compose, immutable
+container images, and Caddy HTTPS. Its PostgreSQL server is shared with
+PulseExchange through private networking, with separate databases and restricted
+application accounts. GitHub Actions deploys through VM-scoped OIDC access.
+
+- [Current deployment status, migration, and cost assumptions](docs/economy-migration.md)
+- [Economy VM setup and deployment](docs/azure-economy.md)
+
+### Original Container Apps deployment
+
 The Azure deployment keeps only the Nginx/React application publicly reachable.
 The API and Receiver Lab use internal Container Apps ingress, the worker has no
 ingress, and PostgreSQL is attached through private networking.
+
+This original architecture remains reproducible from `infra/azure`,
+`scripts/azure`, and `.github/workflows/deploy-production.yml`. Its old running
+resources were removed after the verified cutover; the files remain intact.
+The original workflow stays disabled until deliberately reconfigured and enabled
+for a future deployment. Review costs before recreating resources.
 
 Follow:
 

@@ -8,13 +8,43 @@ The user approved discarding the old demo history and starting both replacement 
 
 The original `infra/azure`, `scripts/azure`, and `deploy-production.yml` files are retained. Existing production deployment flags are paused during the migration so a push cannot reactivate an old writer or undo the cost profile. The new VM workflow is separate and manually dispatched.
 
-This runbook describes the approved procedure. It does not claim that application deployment, public cutover, or old-resource retirement has completed.
+## Verified deployment status on 2026-09-29
+
+- [EventHarbor](https://eventharbor.irfanburakozer.com) and [PulseExchange](https://pulseexchange.irfanburakozer.com) are live with fresh fictional data on `vm-eh-demos-economy` and `vm-px-demos-economy` in `rg-demos-economy`, West US 2. Their shared private PostgreSQL server keeps separate databases and restricted roles. TLS, database isolation, and each role's 12-connection limit were verified.
+- Public EventHarbor checks passed for permanent rejection (`400`) and recovery after rate limiting (`429`, `429`, `200`), with retry gaps of approximately 5.14 seconds. PulseExchange checks passed for a fictional ORBIT trade in REST and WebSocket results, reconnect replay, and cancellation of the test order.
+- At inspection, every application container was healthy, reported zero restarts, and had no current OOM flag. Maintenance timers were enabled. Available VM memory was approximately 250 MiB for EventHarbor and 280 MiB for PulseExchange; these are observations, not capacity guarantees.
+- The [EventHarbor deployment run](https://github.com/irfanozer/eventharbor/actions/runs/36580517335) succeeded. Its controller revision was `43d23fd`; the reused immutable application images still identify application revision `5d50c89`. Legacy deployment files are unchanged, old deployment flags remain disabled, and the new manual economy workflow is enabled.
+- **Old-resource retirement is complete.** Azure confirmed that `rg-eventharbor-prod`, `rg-pulseexchange-prod`, and both Azure-managed networking groups are absent, including their old databases, Container Apps, jobs, load balancers, and public IPs. Replacement infrastructure and the retained backup account were verified after deletion. Old history was intentionally discarded; retained rehearsal backups are earlier snapshots, not final copies. Already-accrued charges and delayed billing entries can still appear.
 
 ## Cost boundary
 
 Two `Standard_B2ats_v2` VMs share one 750-hour monthly allowance when the subscription is eligible. They do not each get 750 hours. Two always-running VMs use approximately 1,460 hours in a 730-hour month, leaving 710 paid hours before other use. The two 64 GiB P6 disks and one B1ms/32 GiB database also depend on the account's remaining benefits. Public IPv4, DNS, transfer, backup overage, and temporary overlap can be billed.
 
 Quota approval does not grant free billing. Creating a replacement database does not reset an already consumed monthly allowance. Savings are not complete while the old paid environments and load balancers remain provisioned.
+
+### Estimate verified on 2026-09-29
+
+USD retail rates for West US 2, assuming 730 running hours per VM and database each month. The benefits column assumes the subscription remains eligible and the listed monthly allowances are available, with no competing usage.
+
+| Resource | Verified retail rate | With benefits | Without benefits |
+| --- | --- | ---: | ---: |
+| Two Linux B2ats_v2 VMs | [$0.0094 per VM-hour][vm-rates] | $6.67 | $13.72 |
+| Two 64 GiB P6 LRS disks | [$9.2801 per disk-month][disk-rates] | $0.00 | $18.56 |
+| One B1ms PostgreSQL server, 32 GB | [$0.017/hour plus $0.115/GB-month][postgres-rates] | $0.00 | $16.09 |
+| Two regional Standard IPv4 addresses | [$0.005 per address-hour][ip-rates] | $7.30 | $7.30 |
+| One private DNS zone | [$0.50/month][dns-rates] | $0.50 | $0.50 |
+| **Monthly baseline** | Before usage extras and taxes | **$14.47** | **$56.17** |
+
+The allowances cover [750 shared hours for eligible VM instances](https://learn.microsoft.com/en-us/azure/cost-management-billing/manage/create-free-services), [two P6 disks](https://marketplace.microsoft.com/en-us/product/microsoft.freeaccountvirtualmachine?tab=Overview), and [750 B1ms PostgreSQL hours with 32 GB of storage and backup storage](https://azure.microsoft.com/en-us/pricing/purchase-options/azure-account). These introductory benefits are time-limited, not permanent free hosting.
+
+Plan for approximately **$15-20/month while those benefits apply**, not a spending cap. Private DNS queries add $0.40 per million; retained Hot LRS backup blobs have a [retail storage rate of $0.0184/GB-month][blob-rates] plus transactions before any storage allowance. Transfer, backup overage, other usage, and taxes are additional. The estimate does not erase already-accrued charges or this month's consumed allowances, and temporary overlap can increase the migration month's bill. After benefits end, the same configuration has an approximately **$56.17/month baseline**, plus those extras.
+
+[vm-rates]: https://prices.azure.com/api/retail/prices?$filter=serviceName%20eq%20%27Virtual%20Machines%27%20and%20armRegionName%20eq%20%27westus2%27%20and%20armSkuName%20eq%20%27Standard_B2ats_v2%27%20and%20priceType%20eq%20%27Consumption%27
+[disk-rates]: https://prices.azure.com/api/retail/prices?$filter=serviceName%20eq%20%27Storage%27%20and%20armRegionName%20eq%20%27westus2%27%20and%20meterName%20eq%20%27P6%20LRS%20Disk%27%20and%20priceType%20eq%20%27Consumption%27
+[postgres-rates]: https://prices.azure.com/api/retail/prices?$filter=serviceName%20eq%20%27Azure%20Database%20for%20PostgreSQL%27%20and%20armRegionName%20eq%20%27westus2%27%20and%20priceType%20eq%20%27Consumption%27
+[ip-rates]: https://prices.azure.com/api/retail/prices?$filter=serviceName%20eq%20%27Virtual%20Network%27%20and%20armRegionName%20eq%20%27westus2%27%20and%20priceType%20eq%20%27Consumption%27
+[dns-rates]: https://prices.azure.com/api/retail/prices?$filter=serviceName%20eq%20%27Azure%20DNS%27%20and%20skuName%20eq%20%27Private%27%20and%20priceType%20eq%20%27Consumption%27
+[blob-rates]: https://prices.azure.com/api/retail/prices?$filter=serviceName%20eq%20%27Storage%27%20and%20armRegionName%20eq%20%27westus2%27%20and%20skuName%20eq%20%27Hot%20LRS%27%20and%20priceType%20eq%20%27Consumption%27
 
 ## Current route: fresh demo data
 
@@ -26,7 +56,7 @@ Quota approval does not grant free billing. Creating a replacement database does
 6. Deploy verified immutable images to each VM. Deployment runs schema migrations; PulseExchange also seeds fictional starter markets through its API. For EventHarbor, create only missing Orders, Shipping, and Inventory Receiver Lab destinations under `http://eventharbor-receiver-prod/webhooks/`, matching the frontend definitions. Do not overwrite conflicting or disabled destinations, and do not retain or expose endpoint-creation signing secrets.
 7. Test readiness, EventHarbor delivery and retry cases with new sample events, PulseExchange order matching and WebSocket confirmation, resource headroom, and HTTPS on the preview hostnames. Use the [hostname-only helper](azure-economy-runtime-hostname.md) for the reviewed final hostname, then coordinate public DNS, redeployment, and final HTTPS checks. The helper itself does not change DNS or restart services. New databases become authoritative for subsequent demo writes.
 8. Configure the independent `azure-economy` GitHub environment and [VM-scoped identity](azure-economy-oidc.md). Keep old workflow files and credentials separate. Do not re-enable old production or shared-Container-Apps deployments after cutover.
-9. Observe shared database CPU credits, connections, memory, storage, and both VMs under demo and maintenance load. Review an exact retirement list and retained backups before deleting old resources. The approved loss of old demo history does not mean old resources have already been deleted. Never dismantle Azure-managed networking groups manually.
+9. Observe shared database CPU credits, connections, memory, storage, and both VMs under demo and maintenance load. Review an exact retirement list and retained backups before deleting old resources. Confirm retirement independently of approval to discard history; the dated deployment status above records the result for this migration. Never dismantle Azure-managed networking groups manually.
 
 ## Alternative: preserve full history in a future migration
 
@@ -43,9 +73,9 @@ Do not mix this route with fresh initialization. It requires untouched final des
 
 For the full-history alternative, if rehearsal stopped before restoring any objects because Azure retained ownership of the `public` schema, use the explicit `RecoverRehearsal` action only after inspecting the failed execution. It downloads and checks the original saved archive, requires the exact empty rehearsal database and retained role with matching run markers, and refuses a populated or unrelated target. It repairs only that rehearsal schema and restores the verified archive in one transaction. It does not replace the backup, drop a database, or change the final application database. Any temporary administrator CONNECT or CREATE permission used for the repair is revoked afterward. Run `Verify -VerifyRehearsal` separately after recovery succeeds. Rehearsal recovery is not a prerequisite for the current fresh-data route.
 
-Before replacement applications accept writes, the stopped original services can be recovered from their exact saved revisions and schedules. After replacement applications accept writes, the new databases are authoritative. Pointing back to stale originals would lose those writes; freeze and reconcile data before any rollback. A failed script must be inspected before retrying rather than bypassing an existing-target guard.
+Recovery from saved original revisions and schedules was available only while the original resources and databases still existed. The original database servers have now been deleted under the approved discard-history route. The replacement databases are authoritative. Returning to the old deployment profile requires recreating its infrastructure from the preserved files and planning a new data transfer. Retained rehearsal backups are earlier snapshots, not a complete rollback of current data. Freeze and reconcile writes before any future cutover. Inspect a failed script before retrying rather than bypassing an existing-target guard.
 
-Neither these scripts nor the VM workflow automatically delete original databases, original environments, or migration backups. A stopped PostgreSQL server can restart automatically after seven days and continues to incur storage charges. Record an explicit follow-up decision instead of treating a stop as permanent retirement.
+The repository migration helpers and VM workflow do not automatically delete original databases, original environments, or migration backups. This migration uses a separately reviewed and explicitly authorized retirement operation. For future migrations, a stopped PostgreSQL server can restart automatically after seven days and continues to incur storage charges. Record an explicit follow-up decision instead of treating a stop as permanent retirement.
 
 ## Repository ownership
 
