@@ -69,7 +69,7 @@ class DeliveryWorker:
         """Resolve or lease one delivery without holding a lock during HTTP."""
 
         async with self._sessions() as session, session.begin():
-            now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+            now: datetime = (await session.execute(select(func.clock_timestamp()))).scalar_one()
             statement = (
                 select(Delivery)
                 .join(Endpoint, Endpoint.id == Delivery.endpoint_id)
@@ -293,7 +293,9 @@ class DeliveryWorker:
             target_status = DeliveryStatus.RETRY_WAIT
 
         async with self._sessions() as session, session.begin():
-            database_now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+            database_now: datetime = (
+                await session.execute(select(func.clock_timestamp()))
+            ).scalar_one()
             statement = (
                 select(Delivery)
                 .where(

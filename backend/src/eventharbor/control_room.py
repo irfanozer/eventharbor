@@ -277,7 +277,7 @@ class ControlRoomRepository:
             .order_by(Delivery.updated_at.desc(), Delivery.id.desc())
             .limit(limit + 1)
         )
-        rows = (await self._session.execute(statement)).all()
+        rows = (await self._session.execute(statement)).tuples().all()
         visible = rows[:limit]
         records = [
             DeadLetterRecord(
