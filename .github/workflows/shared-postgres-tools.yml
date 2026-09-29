@@ -46,7 +46,7 @@ jobs:
             if ($problems.Count) { throw ($problems | Out-String) }
           }
           Get-ChildItem tests/deployment/test_shared_postgres*.ps1 | ForEach-Object {
-            & $_.FullName
+            & (Get-Command pwsh).Source -NoProfile -File $_.FullName
             if ($LASTEXITCODE -ne 0) { throw 'An offline controller test failed.' }
           }
       - name: Compile the private access foundation without deploying
