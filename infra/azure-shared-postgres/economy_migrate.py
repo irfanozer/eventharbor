@@ -71,6 +71,7 @@ class EconomyPg(m.Pg):
                                "'public_owner',(SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='public'),"
                                "'admin_owner',(SELECT pg_has_role('portfolio_admin',nspowner,'USAGE') FROM pg_namespace WHERE nspname='public'),"
                                "'admin_connect',has_database_privilege('portfolio_admin',d.oid,'CONNECT'),"
+                               "'admin_create',has_database_privilege('portfolio_admin',d.oid,'CREATE'),"
                                "'relations',(SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE " + USER_NAMESPACE + "),"
                                "'types',(SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE " + USER_NAMESPACE + "),"
                                "'routines',(SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE " + USER_NAMESPACE + "),"
@@ -121,18 +122,21 @@ class EconomyPg(m.Pg):
             target.sql(statement, readonly=False)
             return
         # The old helper closed PUBLIC CONNECT and its admin has SET membership
-        # without INHERIT. Grant only that existing admin a temporary connection
-        # to this empty rehearsal, then remove the grant even if repair fails.
-        temporary_connect = not metadata['admin_connect']
+        # without INHERIT. PostgreSQL's ALTER SCHEMA OWNER also checks CREATE on
+        # the database for the current caller, not the new schema owner. Grant
+        # only this existing admin's missing CONNECT/CREATE privileges, then
+        # remove exactly those temporary grants even if repair fails.
+        temporary = [privilege for privilege, key in (('CONNECT', 'admin_connect'), ('CREATE', 'admin_create'))
+                     if not metadata[key]]
         try:
-            if temporary_connect:
-                target.sql('BEGIN;\n' + self.rehearsal_guard(target, owner) + 'GRANT CONNECT ON DATABASE '
+            if temporary:
+                target.sql('BEGIN;\n' + self.rehearsal_guard(target, owner) + 'GRANT ' + ','.join(temporary) + ' ON DATABASE '
                            + m.ident(target.database.name) + ' TO portfolio_admin;\nCOMMIT;', readonly=False)
             admin_target = EconomyPg(replace(self.database, name=target.database.name), self.run_id)
             admin_target.sql(statement, readonly=False)
         finally:
-            if temporary_connect:
-                target.sql('REVOKE CONNECT ON DATABASE ' + m.ident(target.database.name) + ' FROM portfolio_admin;', readonly=False)
+            if temporary:
+                target.sql('REVOKE ' + ','.join(temporary) + ' ON DATABASE ' + m.ident(target.database.name) + ' FROM portfolio_admin;', readonly=False)
 
     def create_target(self, database, role, password, locale):
         if database not in {project + '_rehearsal' for project in SOURCES} or role != database + '_app':

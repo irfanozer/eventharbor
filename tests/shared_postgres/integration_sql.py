@@ -15,6 +15,8 @@ from dataclasses import replace
 import os
 from pathlib import Path
 import secrets
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -53,6 +55,17 @@ class CopySqlIntegration(unittest.TestCase):
         self.assertEqual(Path(m.__file__).resolve(), Path("/app/migrate.py"))
         self.assertEqual(Path(economy.__file__).resolve(), Path("/app/economy_migrate.py"))
         original_env = m.Database.env
+        original_run = subprocess.run
+
+        def fixture_run(arguments, *args, **kwargs):
+            result = original_run(arguments, *args, **kwargs)
+            if result.returncode and Path(arguments[0]).name == 'psql':
+                # Disposable fixture only. Print SQLSTATE, never the SQL input,
+                # password environment, row data, or raw server error context.
+                stderr = result.stderr.decode(errors='replace') if isinstance(result.stderr, bytes) else result.stderr or ''
+                states = sorted(set(re.findall(r'ERROR:\s+([0-9A-Z]{5})(?:\s|$)', stderr)))
+                print('FIXTURE_PSQL_FAILURE exit=' + str(result.returncode) + ' sqlstate=' + ','.join(states or ['unavailable']), flush=True)
+            return result
 
         def fixture_env(database, run_id, *, readonly=False):
             if (database.host != HOST or database.name not in ALLOWED_DATABASES
@@ -64,7 +77,7 @@ class CopySqlIntegration(unittest.TestCase):
             result.pop("PGSSLROOTCERT", None)
             return result
 
-        with patch.object(m.Database, "env", fixture_env):
+        with patch.object(m.Database, "env", fixture_env), patch.object(subprocess, 'run', fixture_run):
             self.run_copy_checks(m, economy)
         self.assertIs(m.Database.env, original_env)
 
@@ -123,6 +136,16 @@ class CopySqlIntegration(unittest.TestCase):
                         m.Pg.create_target(foundation_admin, target_name, application_role, application_password, source.locale())
                         azure_public_schema()
                         self.assertFalse(target.json("SELECT to_json(has_schema_privilege(current_user,'public','CREATE'));"))
+                        # Reproduce the missing CURRENT-caller CREATE privilege:
+                        # CONNECT alone permits login but not schema transfer.
+                        target.sql('GRANT CONNECT ON DATABASE ' + m.ident(target_name) + ' TO portfolio_admin;', readonly=False)
+                        admin_target = economy.EconomyPg(replace(foundation_admin.database, name=target_name), RUN_ID)
+                        try:
+                            self.assertFalse(admin_target.json("SELECT to_json(has_database_privilege(current_user,current_database(),'CREATE'));"))
+                            with self.assertRaises(m.SafeError):
+                                admin_target.sql('ALTER SCHEMA public OWNER TO ' + m.ident(application_role) + ';', readonly=False)
+                        finally:
+                            target.sql('REVOKE CONNECT ON DATABASE ' + m.ident(target_name) + ' FROM portfolio_admin;', readonly=False)
                         foundation_admin.prepare_rehearsal_schema(target, recovery=True)
                     else:
                         original_create = m.Pg.create_target
@@ -137,6 +160,7 @@ class CopySqlIntegration(unittest.TestCase):
                     self.assertEqual(membership, {"can_set": True, "inherits": False})
                     self.assertEqual(target.json("SELECT to_json(pg_get_userbyid(nspowner)::text) FROM pg_namespace WHERE nspname='public';"), application_role)
                     self.assertFalse(target.json("SELECT to_json(has_database_privilege('portfolio_admin',current_database(),'CONNECT'));"))
+                    self.assertFalse(target.json("SELECT to_json(has_database_privilege('portfolio_admin',current_database(),'CREATE'));"))
                     app_attributes = foundation_admin.json("SELECT json_build_object('superuser',rolsuper,'createdb',rolcreatedb,"
                                                        "'createrole',rolcreaterole,'replication',rolreplication,'bypassrls',rolbypassrls,"
                                                        "'memberships',(SELECT count(*) FROM pg_auth_members WHERE member=r.oid)) "

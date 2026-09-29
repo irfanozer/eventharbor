@@ -139,7 +139,7 @@ class RehearsalRecoveryTests(unittest.TestCase):
                          'role_comment': 'shared-postgres-helper:' + self.run_id, 'login': True,
                          'superuser': False, 'createdb': False, 'createrole': False, 'replication': False,
                          'bypassrls': False, 'memberships': 0, 'schemas': ['public'], 'public_owner': 'azure_pg_admin',
-                         'admin_owner': True, 'admin_connect': False, 'relations': 0, 'types': 0, 'routines': 0,
+                         'admin_owner': True, 'admin_connect': False, 'admin_create': False, 'relations': 0, 'types': 0, 'routines': 0,
                          'extensions': ['plpgsql'], 'large_objects': 0, 'event_triggers': 0, 'sessions': 0}
 
     def test_empty_run_marked_azure_rehearsal_guard_and_refusals(self):
@@ -173,19 +173,28 @@ class RehearsalRecoveryTests(unittest.TestCase):
                     self.admin.prepare_rehearsal_schema(self.target, recovery=True)
             self.assertEqual(len(calls), 3)
             self.assertEqual(calls[0][0], 'eventharbor_rehearsal_app')
-            self.assertIn('GRANT CONNECT ON DATABASE "eventharbor_rehearsal" TO portfolio_admin', calls[0][1])
+            self.assertIn('GRANT CONNECT,CREATE ON DATABASE "eventharbor_rehearsal" TO portfolio_admin', calls[0][1])
             self.assertEqual(calls[1][0], 'portfolio_admin')
             self.assertIn("pg_has_role(current_user,'azure_pg_admin','USAGE')", calls[1][1])
             self.assertIn('SET LOCAL ROLE "eventharbor_rehearsal_app"', calls[1][1])
-            self.assertIn('REVOKE CONNECT ON DATABASE "eventharbor_rehearsal" FROM portfolio_admin', calls[-1][1])
+            self.assertIn('REVOKE CONNECT,CREATE ON DATABASE "eventharbor_rehearsal" FROM portfolio_admin', calls[-1][1])
             for _, sql in calls:
                 for forbidden in ('DROP ', 'TRUNCATE ', 'CREATE ROLE', 'PASSWORD'):
                     self.assertNotIn(forbidden, sql)
 
     def test_existing_admin_access_is_not_revoked(self):
-        with patch.object(self.admin, 'empty_rehearsal', return_value={**self.metadata, 'admin_connect': True}), patch.object(e.EconomyPg, 'sql') as execute:
+        with patch.object(self.admin, 'empty_rehearsal', return_value={**self.metadata, 'admin_connect': True, 'admin_create': True}), patch.object(e.EconomyPg, 'sql') as execute:
             self.admin.prepare_rehearsal_schema(self.target, recovery=True)
         execute.assert_called_once()
+
+    def test_only_missing_admin_privilege_is_granted_and_revoked(self):
+        for existing, missing in (('CONNECT', 'CREATE'), ('CREATE', 'CONNECT')):
+            value = {**self.metadata, 'admin_' + existing.lower(): True}
+            with patch.object(self.admin, 'empty_rehearsal', return_value=value), patch.object(e.EconomyPg, 'sql') as execute:
+                self.admin.prepare_rehearsal_schema(self.target, recovery=True)
+            self.assertEqual(execute.call_count, 3)
+            self.assertIn('GRANT ' + missing + ' ON DATABASE', execute.call_args_list[0].args[0])
+            self.assertEqual(execute.call_args_list[-1].args[0], 'REVOKE ' + missing + ' ON DATABASE "eventharbor_rehearsal" FROM portfolio_admin;')
 
     def test_guard_is_repeated_before_schema_mutation(self):
         guard = self.admin.rehearsal_guard(self.target, 'azure_pg_admin')
