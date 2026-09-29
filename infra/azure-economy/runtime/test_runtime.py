@@ -78,7 +78,7 @@ class EnvironmentValidation(unittest.TestCase):
         self.assertEqual(check["restart"], "no")
         self.assertTrue(check["read_only"])
         self.assertEqual(check["cap_drop"], ["ALL"])
-        self.assertFalse(check.get("cap_add"))
+        self.assertEqual(check["cap_add"], ["NET_BIND_SERVICE"])
         self.assertIn("no-new-privileges:true", check["security_opt"])
         self.assertEqual(set(check["tmpfs"]), {
             "/tmp:size=16m,mode=1777", "/data:size=16m,mode=0700", "/config:size=4m,mode=0700",

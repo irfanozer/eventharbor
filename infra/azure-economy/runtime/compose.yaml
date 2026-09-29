@@ -150,6 +150,8 @@ services:
 
   caddy-check:
     <<: *hardened
+    # The official binary's file capability requires this even for validation.
+    cap_add: [NET_BIND_SERVICE]
     profiles: [tasks]
     image: ${CADDY_IMAGE:?official Caddy digest required}
     platform: linux/amd64
