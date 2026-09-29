@@ -44,13 +44,24 @@ class AttachRuntimeTests(unittest.TestCase):
             "table_rows": {table: 3 for table in tables},
         }
 
-    def run_host(self, record=None, returncode=0, raw=None, error=None):
+    def run_host(self, record=None, returncode=0, raw=None, error=None, owner_uid=0):
         output = io.StringIO()
         real_path = Path
+        real_stat = Path.stat
+
+        def fixture_stat(path, *args, **kwargs):
+            metadata = real_stat(path, *args, **kwargs)
+            if path in (self.root / "eventharbor", self.root / "pulseexchange"):
+                values = list(metadata)
+                values[4] = owner_uid
+                return os.stat_result(values)
+            return metadata
+
         stdout = json.dumps(self.record(self.values["ECONOMY_PROJECT"]) if record is None else record) if raw is None else raw
         with (
             patch.dict(os.environ, self.values, clear=True),
             patch("pathlib.Path", side_effect=lambda value: self.root if value == "/etc" else real_path(value)),
+            patch.object(real_path, "stat", autospec=True, side_effect=fixture_stat),
             patch("subprocess.run", return_value=subprocess.CompletedProcess([], returncode, stdout, "SECRET_DIAGNOSTIC"), side_effect=error) as database,
             patch.object(os, "geteuid", return_value=0, create=True),
             patch.object(os, "fchown", create=True),
@@ -127,6 +138,12 @@ class AttachRuntimeTests(unittest.TestCase):
         self.assertIn("already exists", failure)
         database.assert_not_called()
         self.assertEqual(target.read_text(), "retained")
+
+    def test_nonroot_configuration_folder_stops_before_database_request(self):
+        database, _, failure = self.run_host(owner_uid=1001)
+        self.assertIsNotNone(failure)
+        database.assert_not_called()
+        self.assertFalse((self.root / "eventharbor/runtime.env").exists())
 
     def test_invalid_host_or_environment_stops_before_database_request(self):
         for key, value in (("ECONOMY_PGHOST", "localhost"), ("ECONOMY_ACME_EMAIL", "bad$@example.com"),
