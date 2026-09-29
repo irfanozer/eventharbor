@@ -185,13 +185,18 @@ Assert-Check ($result.Failed -and $result.Bodies.Count -eq 0) 'An indeterminate 
 $result=Invoke-EconomyOperatorFixture -TestAction FinalCopy
 Assert-Check ($result.Failed -and $result.Bodies.Count -eq 0) 'FinalCopy bypassed the writer-freeze gate.'
 $rehearse=Invoke-EconomyOperatorFixture -TestAction Rehearse
+$recover=Invoke-EconomyOperatorFixture -TestAction RecoverRehearsal
 $final=Invoke-EconomyOperatorFixture -TestAction FinalCopy -Frozen
 $verifyRehearse=Invoke-EconomyOperatorFixture -TestAction Verify -Rehearsal
 $verifyFinal=Invoke-EconomyOperatorFixture -TestAction Verify
-foreach ($case in @($rehearse,$final,$verifyRehearse,$verifyFinal)) {Assert-Check (-not $case.Failed -and $case.Bodies.Count -eq 1) "Execution fixture failed: $($case.Failure)"}
+foreach ($case in @($rehearse,$recover,$final,$verifyRehearse,$verifyFinal)) {Assert-Check (-not $case.Failed -and $case.Bodies.Count -eq 1) "Execution fixture failed: $($case.Failure)"}
 function Get-Run($Case) {@($Case.Bodies[0].containers[0].env | Where-Object name -CEQ 'MIGRATION_RUN_ID')[0].value}
 Assert-Check ((Get-Run $rehearse) -cne (Get-Run $final)) 'Rehearsal and final backup paths collide.'
 Assert-Check ((Get-Run $rehearse) -ceq (Get-Run $verifyRehearse)) 'Rehearsal Verify selected the wrong manifest.'
+Assert-Check ((Get-Run $rehearse) -ceq (Get-Run $recover)) 'Recovery selected a new or final backup path.'
+Assert-Check ($recover.Journal.projects.pulseexchange.lastPhase -ceq 'rehearsal' -and $recover.Bodies[0].containers[0].args[0] -ceq 'RecoverRehearsal') 'Recovery mode or journal phase was not preserved.'
+$recoverPlan=Invoke-EconomyOperatorFixture -TestAction RecoverRehearsal -NoApply
+Assert-Check (-not $recoverPlan.Failed -and $recoverPlan.Calls -eq 0) 'Recovery plan made Azure requests.'
 Assert-Check ((Get-Run $final) -ceq (Get-Run $verifyFinal)) 'Final Verify selected the wrong manifest.'
 $projected=Invoke-EconomyOperatorFixture -TestAction Rehearse -MutateJob {
     param($j)

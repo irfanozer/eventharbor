@@ -57,8 +57,8 @@ class CredentialsAndSqlTests(unittest.TestCase):
                 prefix = prefix.left
             if isinstance(prefix, ast.Constant) and isinstance(prefix.value, str):
                 projections.append(prefix.value.strip())
-        for boolean in ("rolsuper", "EXISTS(", "has_database_privilege("):
-            self.assertEqual(sum(value.startswith("SELECT to_json(" + boolean) for value in projections), 1)
+        for boolean in ("rolsuper", "EXISTS(", "has_database_privilege(", "has_schema_privilege("):
+            self.assertGreaterEqual(sum(value.startswith("SELECT to_json(" + boolean) for value in projections), 1)
             self.assertFalse(any(value.startswith("SELECT " + boolean) for value in projections))
 
     def test_fixed_endpoints_and_tls_without_password_arguments(self):

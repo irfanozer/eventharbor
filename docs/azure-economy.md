@@ -4,11 +4,7 @@
 
 This deployment is the selected replacement for the existing Container Apps deployment. Follow the [combined migration runbook](economy-migration.md): both source databases move directly to the new shared server. The new foundation has been provisioned after quota approval, but that is not proof that database copy, application cutover, or source retirement is complete. It does not replace or edit `infra/azure`, `scripts/azure`, or the production workflow.
 
-On September 28, 2026, Azure reported both `Standard_B1s` and `Standard_B2ats_v2` as unavailable to this subscription in East US 2. The regional `standardBasv2Family` quota was zero. Do not run a paid substitute because a free-eligible size is unavailable. Resolve capacity and quota first, then confirm the actual free-service meters in this subscription.
-
-Those pre-approval read-only checks also found both sizes restricted in East US. In West US 2, B2ats_v2 was available without a zone pin but initially had zero family quota; B1s remained restricted. These are historical capacity observations, not the current approved quota state.
-
-The selected layout is **two B2ats_v2 VMs in West US 2**, with explicit acknowledgment that they share one allowance and some compute is paid. Four Basv2 quota cores were approved and the foundation was provisioned in `rg-demos-economy`. This was an explicit choice, not an automatic paid fallback. The templates still retain their distinct-SKU default for other reviewed deployments.
+The selected layout is **two B2ats_v2 VMs in West US 2**, with explicit acknowledgment that they share one allowance and some compute is paid. Azure approved four Standard Basv2 family vCPUs, and both VMs plus the shared private PostgreSQL server have been provisioned in `rg-demos-economy`. The earlier zero-quota finding was resolved by that approval. Capacity restrictions observed in East US and East US 2 before approval explain the region choice; they do not block this provisioned foundation. The templates still retain their distinct-SKU default for other reviewed deployments.
 
 ## What changes
 
@@ -53,9 +49,9 @@ Set a subscription budget of $20 with actual-cost notifications at 50%, 80% and 
 
 Sources: [Azure free-account offers](https://azure.microsoft.com/en-us/pricing/purchase-options/azure-account), [shared free allowances](https://learn.microsoft.com/en-us/azure/cost-management-billing/manage/create-free-services), [checking free-service usage](https://learn.microsoft.com/en-us/azure/cost-management-billing/manage/check-free-service-usage), [public IP pricing](https://azure.microsoft.com/en-us/pricing/details/ip-addresses/).
 
-## 1. Resolve availability before any paid operation
+## 1. Check availability when creating a foundation
 
-Use PowerShell 7.4 or later, Azure CLI, and the correct signed-in subscription. Run the read-only preflight from the EventHarbor checkout:
+The current foundation already exists, so continue with the combined migration runbook rather than provisioning it again. For a future foundation deployment or a reviewed capacity change, use PowerShell 7.4 or later, Azure CLI, and the correct signed-in subscription. Run the read-only preflight from the EventHarbor checkout:
 
 ```powershell
 .\scripts\azure-economy\bootstrap-foundation.ps1 `
@@ -68,13 +64,15 @@ Use PowerShell 7.4 or later, Azure CLI, and the correct signed-in subscription. 
   -CheckOnly
 ```
 
-This is expected to block on the current zero Basv2 quota, and to flag the old databases' shared allowance use. In Azure Portal, open **Quotas > Compute**, select the subscription and **West US 2**, and request a limit of **four vCPUs for the Standard Basv2 Family**. Each chosen VM needs two cores. A positive quota does not guarantee regional capacity; rerun preflight after approval. Do not accidentally select B2als_v2 or B2pls_v2: these are different sizes.
+The approved West US 2 Standard Basv2 family limit is four vCPUs, and the two existing VMs use those four cores. Approval does not provide capacity for two additional VMs. Preflight also checks existing servers' shared allowance use; its capacity result must be interpreted against the intended create or reuse operation. A positive quota alone does not guarantee regional capacity. Do not accidentally select B2als_v2 or B2pls_v2: these are different sizes.
 
 For the distinct-SKU alternative, first obtain B1s subscription access and sufficient B-family quota in a region that supports both VMs and PostgreSQL. Omit the two explicit B2ats size arguments and the shared-hour acknowledgment to use that default. It is currently unavailable in the checked regions.
 
 Confirm the subscription's PostgreSQL B1ms compute, 32 GiB storage/backup and Premium P6 disk meters before asserting `-ConfirmFreeAllowances`. If the portal does not show them, ask Azure billing support rather than treating zero-dollar historical meter records as proof.
 
 ## 2. Provision only the separate foundation
+
+Skip this step for the already provisioned `rg-demos-economy` foundation. The following instructions describe recreating the deployment when needed.
 
 After capacity, quota, free-service eligibility and the cost estimate are accepted, run the bootstrap with the same region and size parameters, replacing `-CheckOnly` with `-Deploy`, `-ConfirmCosts` and `-ConfirmFreeAllowances`. Add `-AcknowledgeSharedAllowances` only after reviewing the existing servers' remaining allowance consumption and temporary overlap cost. Review its parameter help first:
 
@@ -86,15 +84,17 @@ Supply an SSH **public** key even if public SSH remains closed. Keep the private
 
 Record the output VM names, public DNS names, and PostgreSQL server name. These are not secrets. Do not publish administrator credentials. Test using each VM's Azure-provided DNS name before moving custom domains.
 
-## 3. Initialize the two isolated database roles
+## 3. Restore existing databases, then attach their retained roles
 
-From the EventHarbor checkout, run `scripts/azure-economy/initialize-runtime.ps1` once for each project. It accepts `-Project eventharbor` or `-Project pulseexchange`, plus `-SubscriptionId`, `-ResourceGroup`, `-VmName`, `-PostgresHost`, `-PostgresAdministrator`, `-PublicHostname` and `-AcmeEmail`.
+For the current migration, follow [the combined migration runbook](economy-migration.md): inspect and rehearse both copies, freeze the old writers, make both final copies, and verify both final results. The copy process creates and retains the separate application roles and passwords. Complete both final verifications before attaching either application VM.
 
-Use the **new** economy database host and each **new** VM DNS name. The script prompts for the new database administrator password, creates a random application password, and transmits secrets as protected Run Command parameters. The application URL is initially stored in `/etc/<project>/runtime.env`, owned by root with mode 0600. Deployment also keeps root-only current, previous and failed release configuration files as documented in the runtime README. Routine CI deployment does not need database credentials.
+Then use the EventHarbor checkout's `scripts/azure-economy/attach-restored-runtime.ps1` for each project, as described in [attaching a restored database](azure-economy-attach-restored-runtime.md). Supply the retained application password, the new shared PostgreSQL hostname, and the corresponding new VM preview hostname. Attach validates the restored database, role isolation, ownership, and TLS using read-only queries. It writes `/etc/<project>/runtime.env` with root ownership and mode 0600, without creating a role, rotating a password, or starting an application. It refuses to overwrite existing runtime configuration.
 
-The initializer checks VM and database ownership tags. It refuses to overwrite an existing configuration or rotate an existing application role. If a partial initialization fails, inspect the protected operation and recover deliberately; do not repeatedly generate new passwords. A `-DryRun` validates input and prints a safe plan without reading secrets or calling Azure.
+Do not run `initialize-runtime.ps1` against these restored databases. A successful attach confirms its checks and configuration write, not successful application deployment or public cutover. Deployment also keeps root-only current, previous and failed release configurations as documented in the runtime README. Routine CI deployment does not need database credentials.
 
-This prepares empty new databases. It does **not** copy old history. Do not delete the old databases based on successful initialization.
+### Fresh deployments with no history to preserve
+
+`scripts/azure-economy/initialize-runtime.ps1` is the separate path for a fresh, empty deployment. It accepts `-Project eventharbor` or `-Project pulseexchange`, prompts for the new database administrator password, and creates a random application password and isolated role. It prepares empty databases and runtime configuration; it does not copy existing history. Use this initializer only when deliberately creating a fresh deployment. If initialization partially fails, inspect the protected operation before retrying. Both helpers provide `-DryRun` for local input validation without Azure calls.
 
 ## 4. Deploy and test without changing production DNS
 
@@ -171,4 +171,4 @@ python .\infra\azure-economy\runtime\test_runtime.py
 
 Run the runtime test in PulseExchange too. The controller suite checks the sibling PulseExchange checkout if it is present, but does not require one for EventHarbor-only CI.
 
-The Docker engine was unavailable, so actual container execution and the 1 GiB memory limits remain unverified. These checks are separate from real cloud verification. This guide must not be read as confirmation that new Azure resources exist, that free allowances have been applied, or that the production migration is complete.
+On September 29, 2026, the restored-runtime attach checks passed with 53 PowerShell assertions and eight Python tests. The two runtime suites passed with 19 EventHarbor tests (one expected skip) and 20 PulseExchange tests; the controller suite passed 30 checks and the preview smoke wrapper passed ten offline tests. The new foundation exists and both VMs have their host setup and swap configured. Actual application execution, public HTTPS, the 1 GiB runtime limits under load, and migration completion still require live verification. Neither provisioning nor these offline checks confirms that free allowances have been applied.

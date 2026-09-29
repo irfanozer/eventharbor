@@ -1,7 +1,7 @@
 #requires -Version 7.4
 [CmdletBinding()]
 param(
-    [ValidateSet('Status','CreateJob','UpdateImage','Inspect','Rehearse','FinalCopy','Verify')][string]$Action='Status',
+    [ValidateSet('Status','CreateJob','UpdateImage','Inspect','Rehearse','RecoverRehearsal','FinalCopy','Verify')][string]$Action='Status',
     [Parameter(Mandatory)][ValidateSet('eventharbor','pulseexchange')][string]$Project,
     [Parameter(Mandatory)][string]$StateDirectory,
     [guid]$SubscriptionId='83099284-9ad4-4140-b8fe-8388b6d98a98',
@@ -203,7 +203,7 @@ function New-EconomyCopyExecutionTemplate($Job,[string]$Mode,[string]$RunId,[boo
     # project the Start API's fields instead of forwarding null/read-only fields.
     # Match the CLI's typed YAML execution path without ever loading secrets.
     $copy=$Job.properties.template.containers[0]
-    $phase=if ($Mode -eq 'Rehearse' -or $Rehearsal) {'rehearsal'} else {'final'}
+    $phase=if ($Mode -in @('Rehearse','RecoverRehearsal') -or $Rehearsal) {'rehearsal'} else {'final'}
     $secretNames=@('SOURCE_DATABASE_URL','TARGET_ADMIN_DATABASE_URL','TARGET_APP_PASSWORD','REHEARSAL_APP_PASSWORD')
     $environment=@(foreach ($setting in $copy.env) {
         if ($setting.name -cin $secretNames) {@{name=$setting.name;secretRef=$setting.secretRef}}
@@ -290,7 +290,7 @@ if ($Action -eq 'Status') {
 Assert-EconomyCopyIdle
 if ($Action -eq 'FinalCopy' -and -not $WritersFrozen) {throw 'FinalCopy requires independently verified stopped source writers and -WritersFrozen.'}
 if ($VerifyRehearsal -and $Action -ne 'Verify') {throw 'VerifyRehearsal is only valid for Verify.'}
-$phase=if ($Action -eq 'Rehearse' -or $VerifyRehearsal) {'rehearsal'} else {'final'}
+$phase=if ($Action -in @('Rehearse','RecoverRehearsal') -or $VerifyRehearsal) {'rehearsal'} else {'final'}
 $template=New-EconomyCopyExecutionTemplate $job $Action $record.runId ([bool]$WritersFrozen) ([bool]$VerifyRehearsal)
 $result=Send-EconomyCopyBody 'post' (Get-EconomyCopyUrl $jobId '/start') $template
 if (-not $result.name) {throw 'Execution acceptance is unconfirmed. Inspect job status before retrying.'}

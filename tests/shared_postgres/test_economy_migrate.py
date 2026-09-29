@@ -129,6 +129,114 @@ class EmptyFoundationTests(unittest.TestCase):
             source.require_frozen()
 
 
+class RehearsalRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.run_id = 'fixture-run-20260929'
+        self.admin = e.EconomyPg(m.Database(e.APPROVED_TARGET_HOST, 'postgres', 'portfolio_admin', 'fixture'), self.run_id)
+        self.target = e.EconomyPg(m.Database(e.APPROVED_TARGET_HOST, 'eventharbor_rehearsal', 'eventharbor_rehearsal_app', PASSWORD), self.run_id)
+        self.metadata = {'database': self.target.database.name, 'user': self.target.database.user,
+                         'owner': self.target.database.user, 'database_comment': 'shared-postgres-helper:' + self.run_id,
+                         'role_comment': 'shared-postgres-helper:' + self.run_id, 'login': True,
+                         'superuser': False, 'createdb': False, 'createrole': False, 'replication': False,
+                         'bypassrls': False, 'memberships': 0, 'schemas': ['public'], 'public_owner': 'azure_pg_admin',
+                         'admin_owner': True, 'admin_connect': False, 'relations': 0, 'types': 0, 'routines': 0,
+                         'extensions': ['plpgsql'], 'large_objects': 0, 'event_triggers': 0, 'sessions': 0}
+
+    def test_empty_run_marked_azure_rehearsal_guard_and_refusals(self):
+        mutations = ({}, {'owner': 'other'}, {'role_comment': 'other'}, {'database_comment': 'other'},
+                     {'relations': 1}, {'types': 1}, {'routines': 1}, {'schemas': ['public', 'extra']},
+                     {'sessions': 1}, {'memberships': 1}, {'superuser': True}, {'createdb': True},
+                     {'createrole': True}, {'replication': True}, {'bypassrls': True}, {'login': False},
+                     {'public_owner': self.target.database.user}, {'public_owner': 'pg_database_owner'},
+                     {'admin_owner': False}, {'extensions': ['plpgsql', 'other']}, {'large_objects': 1}, {'event_triggers': 1})
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), patch.object(self.target, 'require_version'), patch.object(self.target, 'json', return_value={**self.metadata, **mutation}), patch.object(self.target, 'sql') as execute:
+                if mutation:
+                    with self.assertRaises(m.SafeError):
+                        self.admin.empty_rehearsal(self.target, recovery=True)
+                else:
+                    self.assertEqual(self.admin.empty_rehearsal(self.target, recovery=True), self.metadata)
+                execute.assert_not_called()
+
+    def test_recovery_limits_temporary_connection_grant_and_always_revokes(self):
+        for fails in (False, True):
+            calls = []
+            def execute(pg, sql, **kwargs):
+                calls.append((pg.database.user, sql))
+                if fails and 'ALTER SCHEMA' in sql:
+                    raise m.SafeError('Fixture schema repair refused')
+            with patch.object(self.admin, 'empty_rehearsal', return_value=self.metadata), patch.object(e.EconomyPg, 'sql', execute):
+                if fails:
+                    with self.assertRaises(m.SafeError):
+                        self.admin.prepare_rehearsal_schema(self.target, recovery=True)
+                else:
+                    self.admin.prepare_rehearsal_schema(self.target, recovery=True)
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(calls[0][0], 'eventharbor_rehearsal_app')
+            self.assertIn('GRANT CONNECT ON DATABASE "eventharbor_rehearsal" TO portfolio_admin', calls[0][1])
+            self.assertEqual(calls[1][0], 'portfolio_admin')
+            self.assertIn("pg_has_role(current_user,'azure_pg_admin','USAGE')", calls[1][1])
+            self.assertIn('SET LOCAL ROLE "eventharbor_rehearsal_app"', calls[1][1])
+            self.assertIn('REVOKE CONNECT ON DATABASE "eventharbor_rehearsal" FROM portfolio_admin', calls[-1][1])
+            for _, sql in calls:
+                for forbidden in ('DROP ', 'TRUNCATE ', 'CREATE ROLE', 'PASSWORD'):
+                    self.assertNotIn(forbidden, sql)
+
+    def test_existing_admin_access_is_not_revoked(self):
+        with patch.object(self.admin, 'empty_rehearsal', return_value={**self.metadata, 'admin_connect': True}), patch.object(e.EconomyPg, 'sql') as execute:
+            self.admin.prepare_rehearsal_schema(self.target, recovery=True)
+        execute.assert_called_once()
+
+    def test_guard_is_repeated_before_schema_mutation(self):
+        guard = self.admin.rehearsal_guard(self.target, 'azure_pg_admin')
+        for required in ('pg_database', 'pg_authid', 'pg_auth_members', 'pg_namespace', 'pg_class', 'pg_type', 'pg_proc', 'pg_extension', 'pg_event_trigger', 'pg_stat_activity', 'shared-postgres-helper:' + self.run_id):
+            self.assertIn(required, guard)
+        self.assertNotIn(PASSWORD, guard)
+
+    def test_recovery_downloads_same_archive_and_never_reads_or_dumps_live_source(self):
+        calls = []
+        record = {'format': 2, 'project': 'eventharbor', 'run_id': self.run_id, 'mode': 'Rehearse',
+                  'source_host': e.SOURCES['eventharbor'], 'source_database': 'eventharbor',
+                  'target_host': e.APPROVED_TARGET_HOST, 'target_database': 'eventharbor_rehearsal',
+                  'dump_bytes': 7, 'dump_sha256': 'a' * 64, 'source_manifest': copy.deepcopy(MANIFEST)}
+        class Blob:
+            def __init__(self, *args): pass
+            def require_private(self): calls.append('private')
+            def manifest(self): return copy.deepcopy(record)
+            def download_dump(self, path, **kwargs):
+                calls.append('download'); path.write_bytes(b'fixture')
+        @contextmanager
+        def snapshot(*args): yield '00000003-00000004-1'
+        env = {'MIGRATION_PROJECT': 'eventharbor', 'MIGRATION_RUN_ID': self.run_id,
+               'SOURCE_DATABASE_URL': f"postgresql://old:fixture@{e.SOURCES['eventharbor']}/eventharbor?ssl=require",
+               'TARGET_ADMIN_DATABASE_URL': f'postgresql://portfolio_admin:fixture@{e.APPROVED_TARGET_HOST}/postgres?ssl=require',
+               'REHEARSAL_APP_PASSWORD': PASSWORD}
+        def version(pg):
+            self.assertEqual(pg.database.host, e.APPROVED_TARGET_HOST)
+        def native(arguments, environment):
+            self.assertEqual(arguments[0], 'pg_restore')
+            self.assertIn('--single-transaction', arguments)
+            self.assertIn('--dbname=eventharbor_rehearsal', arguments)
+            self.assertEqual(environment['PGPASSWORD'], PASSWORD)
+            calls.append('restore')
+        with patch.object(e, 'EconomyBlob', Blob), patch.object(m, 'require_clients'), patch.object(m, 'native', side_effect=native), patch.object(e.EconomyPg, 'require_version', version), patch.object(e.EconomyPg, 'prepare_rehearsal_schema', side_effect=lambda *args, **kwargs: calls.append('repair')), patch.object(e.EconomyPg, 'analyze_user_tables', side_effect=lambda: calls.append('analyze')), patch.object(e.EconomyPg, 'snapshot', snapshot), patch.object(e.EconomyPg, 'manifest', return_value=MANIFEST):
+            result = e.run('RecoverRehearsal', env)
+        self.assertEqual(calls, ['private', 'download', 'repair', 'restore', 'analyze'])
+        self.assertTrue(result['verified'])
+        self.assertTrue(result['changed'])
+        self.assertFalse(result['sequences_verified'])
+        for key in ('project', 'run_id', 'mode', 'source_host', 'source_database', 'target_host', 'target_database'):
+            original = record[key]
+            record[key] = 'unrelated'
+            calls.clear()
+            with self.subTest(wrong_manifest_field=key), patch.object(e, 'EconomyBlob', Blob), patch.object(m, 'require_clients'), patch.object(e.EconomyPg, 'require_version', version), patch.object(e.EconomyPg, 'prepare_rehearsal_schema') as repair:
+                with self.assertRaises(m.SafeError):
+                    e.run('RecoverRehearsal', env)
+                repair.assert_not_called()
+                self.assertEqual(calls, ['private'])
+            record[key] = original
+
+
 class PhaseTests(unittest.TestCase):
     def exercise(self, project, *, fail_backup=False, frozen=True):
         calls = []

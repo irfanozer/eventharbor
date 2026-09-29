@@ -54,6 +54,93 @@ def parse_database(value, project, *, source):
 
 
 class EconomyPg(m.Pg):
+    def empty_rehearsal(self, target, *, recovery=False):
+        database, role = target.database.name, target.database.user
+        if (database not in {project + '_rehearsal' for project in SOURCES}
+                or role != database + '_app' or target.run_id != self.run_id
+                or self.database.user != FOUNDATION_OWNER):
+            raise m.SafeError('Only the exact retained rehearsal database and application role are supported.')
+        target.require_version()
+        metadata = target.json("SELECT json_build_object('database',current_database(),'user',current_user,"
+                               "'owner',pg_get_userbyid(d.datdba),'database_comment',shobj_description(d.oid,'pg_database'),"
+                               "'role_comment',shobj_description(r.oid,'pg_authid'),'login',r.rolcanlogin,"
+                               "'superuser',r.rolsuper,'createdb',r.rolcreatedb,'createrole',r.rolcreaterole,"
+                               "'replication',r.rolreplication,'bypassrls',r.rolbypassrls,"
+                               "'memberships',(SELECT count(*) FROM pg_auth_members WHERE member=r.oid),"
+                               "'schemas',(SELECT coalesce(json_agg(nspname ORDER BY nspname),'[]'::json) FROM pg_namespace n WHERE " + USER_NAMESPACE + "),"
+                               "'public_owner',(SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='public'),"
+                               "'admin_owner',(SELECT pg_has_role('portfolio_admin',nspowner,'USAGE') FROM pg_namespace WHERE nspname='public'),"
+                               "'admin_connect',has_database_privilege('portfolio_admin',d.oid,'CONNECT'),"
+                               "'relations',(SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE " + USER_NAMESPACE + "),"
+                               "'types',(SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE " + USER_NAMESPACE + "),"
+                               "'routines',(SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE " + USER_NAMESPACE + "),"
+                               "'extensions',(SELECT coalesce(json_agg(extname ORDER BY extname),'[]'::json) FROM pg_extension),"
+                               "'large_objects',(SELECT count(*) FROM pg_largeobject_metadata),"
+                               "'event_triggers',(SELECT count(*) FROM pg_event_trigger),"
+                               "'sessions',(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid())) "
+                               "FROM pg_database d,pg_roles r WHERE d.datname=current_database() AND r.rolname=current_user;")
+        marker = 'shared-postgres-helper:' + self.run_id
+        owners = {'azure_pg_admin'} if recovery else {'azure_pg_admin', 'pg_database_owner', role}
+        if (metadata['database'] != database or metadata['user'] != role or metadata['owner'] != role
+                or metadata['database_comment'] != marker or metadata['role_comment'] != marker
+                or metadata['schemas'] != ['public'] or metadata['extensions'] != ['plpgsql']
+                or metadata['public_owner'] not in owners or metadata['login'] is not True
+                or any(metadata[key] for key in ('superuser', 'createdb', 'createrole', 'replication', 'bypassrls',
+                                                'memberships', 'relations', 'types', 'routines', 'large_objects', 'event_triggers', 'sessions'))
+                or (metadata['public_owner'] == 'azure_pg_admin' and metadata['admin_owner'] is not True)):
+            raise m.SafeError('Rehearsal recovery requires the exact empty, isolated, run-marked database and retained role; nothing was overwritten.')
+        return metadata
+
+    def rehearsal_guard(self, target, owner):
+        database, role = target.database.name, target.database.user
+        marker = m.literal('shared-postgres-helper:' + self.run_id)
+        sql = "DO $guard$ BEGIN IF current_database()<>" + m.literal(database)
+        sql += " OR NOT EXISTS(SELECT 1 FROM pg_database WHERE datname=current_database() AND pg_get_userbyid(datdba)=" + m.literal(role)
+        sql += " AND shobj_description(oid,'pg_database')=" + marker + ")"
+        sql += " OR NOT EXISTS(SELECT 1 FROM pg_roles r WHERE rolname=" + m.literal(role)
+        sql += " AND shobj_description(oid,'pg_authid')=" + marker + " AND rolcanlogin AND NOT(rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)"
+        sql += " AND NOT EXISTS(SELECT 1 FROM pg_auth_members WHERE member=r.oid))"
+        sql += " OR (SELECT count(*) FROM pg_namespace n WHERE " + USER_NAMESPACE + ")<>1"
+        sql += " OR NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='public' AND pg_get_userbyid(nspowner)=" + m.literal(owner) + ")"
+        for catalog, alias, namespace in (('pg_class', 'c', 'relnamespace'), ('pg_type', 't', 'typnamespace'), ('pg_proc', 'p', 'pronamespace')):
+            sql += ' OR EXISTS(SELECT 1 FROM ' + catalog + ' ' + alias + ' JOIN pg_namespace n ON n.oid=' + alias + '.' + namespace + ' WHERE ' + USER_NAMESPACE + ')'
+        sql += " OR EXISTS(SELECT 1 FROM pg_extension WHERE extname<>'plpgsql') OR EXISTS(SELECT 1 FROM pg_largeobject_metadata)"
+        sql += " OR EXISTS(SELECT 1 FROM pg_event_trigger) OR EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid())"
+        return sql + " THEN RAISE EXCEPTION 'Empty rehearsal guard failed'; END IF; END $guard$;\n"
+
+    def prepare_rehearsal_schema(self, target, *, recovery=False):
+        metadata = self.empty_rehearsal(target, recovery=recovery)
+        owner = metadata['public_owner']
+        statement = 'BEGIN;\n' + self.rehearsal_guard(target, owner)
+        if owner == 'azure_pg_admin':
+            statement += "DO $owner$ BEGIN IF current_user<>'portfolio_admin' OR NOT pg_has_role(current_user,'azure_pg_admin','USAGE') THEN RAISE EXCEPTION 'Schema owner access required'; END IF; END $owner$;\n"
+        statement += 'ALTER SCHEMA public OWNER TO ' + m.ident(target.database.user) + ';\n'
+        statement += 'SET LOCAL ROLE ' + m.ident(target.database.user) + ';\n'
+        statement += 'REVOKE ALL ON SCHEMA public FROM PUBLIC;\nCOMMIT;'
+        if owner != 'azure_pg_admin':
+            target.sql(statement, readonly=False)
+            return
+        # The old helper closed PUBLIC CONNECT and its admin has SET membership
+        # without INHERIT. Grant only that existing admin a temporary connection
+        # to this empty rehearsal, then remove the grant even if repair fails.
+        temporary_connect = not metadata['admin_connect']
+        try:
+            if temporary_connect:
+                target.sql('BEGIN;\n' + self.rehearsal_guard(target, owner) + 'GRANT CONNECT ON DATABASE '
+                           + m.ident(target.database.name) + ' TO portfolio_admin;\nCOMMIT;', readonly=False)
+            admin_target = EconomyPg(replace(self.database, name=target.database.name), self.run_id)
+            admin_target.sql(statement, readonly=False)
+        finally:
+            if temporary_connect:
+                target.sql('REVOKE CONNECT ON DATABASE ' + m.ident(target.database.name) + ' FROM portfolio_admin;', readonly=False)
+
+    def create_target(self, database, role, password, locale):
+        if database not in {project + '_rehearsal' for project in SOURCES} or role != database + '_app':
+            raise m.SafeError('Only the exact rehearsal database and role can be created.')
+        super().create_target(database, role, password, locale)
+        target = EconomyPg(replace(self.database, name=database, user=role, password=password), self.run_id)
+        self.prepare_rehearsal_schema(target)
+
     def require_frozen(self):
         count = self.json("SELECT count(*) FROM pg_stat_activity WHERE datname=" + m.literal(self.database.name)
                           + " AND pid<>pg_backend_pid() AND application_name IS DISTINCT FROM " + m.literal("shared-pg-" + self.run_id) + ";")
@@ -140,7 +227,7 @@ def run(mode, environment):
     global phase
     project = environment.get("MIGRATION_PROJECT", "")
     run_id = environment.get("MIGRATION_RUN_ID", "")
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", run_id) or mode not in {"Inspect", "Rehearse", "FinalCopy", "Verify"}:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", run_id) or mode not in {"Inspect", "Rehearse", "RecoverRehearsal", "FinalCopy", "Verify"}:
         raise m.SafeError("A valid migration mode and unique run identifier are required.")
     source = EconomyPg(parse_database(environment.get("SOURCE_DATABASE_URL", ""), project, source=True), run_id)
     admin = EconomyPg(parse_database(environment.get("TARGET_ADMIN_DATABASE_URL", ""), project, source=False), run_id)
@@ -155,7 +242,7 @@ def run(mode, environment):
     role = database + "_app"
     with tempfile.TemporaryDirectory(prefix="economy-copy-") as temporary:
         directory = Path(temporary)
-        if mode != "Verify":
+        if mode not in {"Verify", "RecoverRehearsal"}:
             source.require_version()
             locale = source.locale()
         if mode == "Inspect":
@@ -169,7 +256,7 @@ def run(mode, environment):
         blob = EconomyBlob(environment, run_id, project)
         phase = "private backup validation"
         blob.require_private()
-        if mode == "Verify":
+        if mode in {"Verify", "RecoverRehearsal"}:
             record = blob.manifest()
             identity = {"format": 2, "project": project, "run_id": run_id, "source_host": SOURCES[project],
                         "source_database": project, "target_host": APPROVED_TARGET_HOST, "target_database": database,
@@ -178,10 +265,19 @@ def run(mode, environment):
                 raise m.SafeError("Backup manifest does not belong to this exact project, run and approved destination.")
             blob.download_dump(directory / "verified.dump", expected_size=record.get("dump_bytes"), expected_sha256=record.get("dump_sha256"))
             target.require_version()
+            if mode == 'RecoverRehearsal':
+                phase = 'empty rehearsal schema recovery'
+                admin.prepare_rehearsal_schema(target, recovery=True)
+                phase = 'rehearsal recovery single transaction restore'
+                m.native(['pg_restore', '--no-password', '--no-owner', '--no-acl', '--no-tablespaces',
+                          '--exit-on-error', '--single-transaction', '--dbname=' + database, str(directory / 'verified.dump')], target.database.env(run_id))
+                phase = 'rehearsal recovery statistics'
+                target.analyze_user_tables()
+            phase = 'saved backup data verification'
             with target.snapshot() as snapshot:
                 m.require_same(record["source_manifest"], target.manifest(snapshot, directory), sequences=final)
             return {"mode": mode, "project": project, "verified": True, "backup_download_verified": True,
-                    "sequences_verified": final, "changed": False}
+                    "sequences_verified": final, "changed": mode == 'RecoverRehearsal'}
         if final and environment.get("WRITERS_FROZEN") != "true":
             raise m.SafeError("FinalCopy requires WRITERS_FROZEN=true for this project's complete writer freeze.")
         phase = "destination and source safety checks"
@@ -227,7 +323,9 @@ def run(mode, environment):
         phase = "single transaction restore"
         m.native(["pg_restore", "--no-password", "--no-owner", "--no-acl", "--no-tablespaces",
                   "--exit-on-error", "--single-transaction", "--dbname=" + database, str(downloaded)], target.database.env(run_id))
+        phase = 'restored table statistics'
         target.analyze_user_tables()
+        phase = 'restored data verification'
         with target.snapshot() as snapshot:
             m.require_same(expected, target.manifest(snapshot, directory), sequences=final)
         if final:
@@ -244,7 +342,7 @@ def run(mode, environment):
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("Inspect", "Rehearse", "FinalCopy", "Verify"))
+    parser.add_argument("mode", choices=("Inspect", "Rehearse", "RecoverRehearsal", "FinalCopy", "Verify"))
     args = parser.parse_args()
     try:
         print(json.dumps(run(args.mode, os.environ), sort_keys=True))

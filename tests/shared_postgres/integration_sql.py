@@ -111,20 +111,38 @@ class CopySqlIntegration(unittest.TestCase):
                     source = m.Pg(replace(source_admin.database, name=source_name), RUN_ID)
                     self.seed(source)
                     application_password = secrets.token_hex(24)
+                    target = economy.EconomyPg(m.Database(HOST, target_name, application_role, application_password), RUN_ID)
+                    def azure_public_schema():
+                        m.Pg(replace(bootstrap.database, name=target_name), RUN_ID).sql(
+                            'ALTER SCHEMA public OWNER TO azure_pg_admin;', readonly=False)
                     # Exercise the actual production role/database creation SQL,
                     # including createrole_self_grant=SET without INHERIT.
-                    target_admin.create_target(target_name, application_role, application_password, source.locale())
-                    membership = target_admin.json("SELECT json_build_object('can_set',pg_has_role(current_user,"
+                    if target_name == 'eventharbor_rehearsal':
+                        # Reproduce the already-created Azure rehearsal exactly:
+                        # correct retained app/database, inaccessible public CREATE.
+                        m.Pg.create_target(foundation_admin, target_name, application_role, application_password, source.locale())
+                        azure_public_schema()
+                        self.assertFalse(target.json("SELECT to_json(has_schema_privilege(current_user,'public','CREATE'));"))
+                        foundation_admin.prepare_rehearsal_schema(target, recovery=True)
+                    else:
+                        original_create = m.Pg.create_target
+                        def create_azure_template(admin, database, role, password, locale):
+                            original_create(admin, database, role, password, locale)
+                            azure_public_schema()
+                        with patch.object(m.Pg, 'create_target', create_azure_template):
+                            foundation_admin.create_target(target_name, application_role, application_password, source.locale())
+                    membership = foundation_admin.json("SELECT json_build_object('can_set',pg_has_role(current_user,"
                                                    + m.literal(application_role) + ",'SET'),'inherits',pg_has_role(current_user,"
                                                    + m.literal(application_role) + ",'USAGE')); ")
                     self.assertEqual(membership, {"can_set": True, "inherits": False})
-                    app_attributes = target_admin.json("SELECT json_build_object('superuser',rolsuper,'createdb',rolcreatedb,"
+                    self.assertEqual(target.json("SELECT to_json(pg_get_userbyid(nspowner)::text) FROM pg_namespace WHERE nspname='public';"), application_role)
+                    self.assertFalse(target.json("SELECT to_json(has_database_privilege('portfolio_admin',current_database(),'CONNECT'));"))
+                    app_attributes = foundation_admin.json("SELECT json_build_object('superuser',rolsuper,'createdb',rolcreatedb,"
                                                        "'createrole',rolcreaterole,'replication',rolreplication,'bypassrls',rolbypassrls,"
                                                        "'memberships',(SELECT count(*) FROM pg_auth_members WHERE member=r.oid)) "
                                                        "FROM pg_roles r WHERE rolname=" + m.literal(application_role) + ";")
                     self.assertEqual(app_attributes, {"superuser": False, "createdb": False, "createrole": False,
                                                      "replication": False, "bypassrls": False, "memberships": 0})
-                    target = m.Pg(m.Database(HOST, target_name, application_role, application_password), RUN_ID)
                     target.require_version()
                     dump = directory / (source_name + ".dump")
                     with source.snapshot() as snapshot:
@@ -150,7 +168,9 @@ class CopySqlIntegration(unittest.TestCase):
                     self.assertEqual(target.json("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' "
                                                  "AND table_name='fixture_events' AND column_name='fixture_migration_probe';"), 0)
                     with self.assertRaises(m.SafeError):
-                        target_admin.create_target(target_name, application_role, application_password, source.locale())
+                        foundation_admin.create_target(target_name, application_role, application_password, source.locale())
+                    with self.assertRaises(m.SafeError):
+                        foundation_admin.prepare_rehearsal_schema(target, recovery=True)
                     print("PG17 non-superuser copy, exact manifest, sequence and owner-DDL checks passed: " + target_name)
                     project = target_name.removesuffix("_rehearsal")
                     foundation_admin.sql("CREATE DATABASE " + m.ident(project)
