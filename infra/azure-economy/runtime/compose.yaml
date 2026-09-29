@@ -1,0 +1,192 @@
+name: eventharbor-economy
+
+x-hardened: &hardened
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 80
+  logging:
+    driver: local
+    options:
+      max-size: "5m"
+      max-file: "2"
+  stop_grace_period: 30s
+  tmpfs:
+    - /tmp:size=16m,mode=1777
+
+x-backend: &backend
+  <<: *hardened
+  image: ${BACKEND_IMAGE:?backend digest required}
+  platform: linux/amd64
+  networks: [application]
+  mem_limit: 128m
+  cpus: 0.75
+
+x-app-env: &app-env
+  EVENTHARBOR_ENVIRONMENT: production
+  EVENTHARBOR_DATABASE_URL: ${EVENTHARBOR_DATABASE_URL:?private Azure PostgreSQL URL required}
+  EVENTHARBOR_DATABASE_SSL_MODE: verify-full
+  EVENTHARBOR_DATABASE_ECHO: "false"
+  EVENTHARBOR_DATABASE_POOL_SIZE: "2"
+  EVENTHARBOR_DATABASE_MAX_OVERFLOW: "0"
+  EVENTHARBOR_RECEIVER_LAB_URL: http://eventharbor-receiver-prod/webhooks
+  EVENTHARBOR_RECEIVER_LAB_CONTROL_URL: http://eventharbor-receiver-prod
+  # Match the existing production demo timings, not local development mode.
+  EVENTHARBOR_WORKER_MAX_ATTEMPTS: "4"
+  EVENTHARBOR_WORKER_BASE_DELAY_SECONDS: "1"
+  EVENTHARBOR_WORKER_MAX_DELAY_SECONDS: "2"
+  EVENTHARBOR_WORKER_RETRY_AFTER_CAP_SECONDS: "5"
+  EVENTHARBOR_LOG_LEVEL: INFO
+
+services:
+  api:
+    <<: *backend
+    restart: unless-stopped
+    mem_limit: 160m
+    environment: *app-env
+    command: ["uvicorn", "eventharbor.api:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]
+    depends_on:
+      receiver-lab:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+
+  worker:
+    <<: *backend
+    restart: unless-stopped
+    environment: *app-env
+    command: ["python", "-m", "eventharbor.deliveries.worker"]
+    volumes:
+      - ./worker-health.py:/runtime/worker-health.py:ro
+    depends_on:
+      receiver-lab:
+        condition: service_healthy
+    healthcheck:
+      # Dependency/process probe only; the existing worker has no heartbeat.
+      test: ["CMD", "python", "/runtime/worker-health.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+
+  receiver-lab:
+    <<: *backend
+    restart: unless-stopped
+    mem_limit: 96m
+    environment:
+      EVENTHARBOR_ENVIRONMENT: production
+      EVENTHARBOR_DATABASE_URL: ${EVENTHARBOR_DATABASE_URL:?private Azure PostgreSQL URL required}
+      EVENTHARBOR_DATABASE_SSL_MODE: verify-full
+      EVENTHARBOR_LOG_LEVEL: INFO
+    # Legacy frontend images contain this hostname and an implicit port 80.
+    command: ["uvicorn", "eventharbor.receiver_lab.api:app", "--host", "0.0.0.0", "--port", "80", "--no-proxy-headers"]
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    networks:
+      application:
+        aliases: [eventharbor-receiver-prod]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  migrate:
+    <<: *backend
+    profiles: [tasks]
+    restart: "no"
+    environment: *app-env
+    command: ["alembic", "-c", "/app/alembic.ini", "upgrade", "head"]
+
+  maintenance:
+    <<: *backend
+    profiles: [tasks]
+    restart: "no"
+    environment:
+      <<: *app-env
+      EVENTHARBOR_DATABASE_POOL_SIZE: "1"
+      EVENTHARBOR_RETENTION_DAYS: "7"
+      EVENTHARBOR_RETENTION_BATCH_SIZE: "500"
+      EVENTHARBOR_RETENTION_MAX_EVENTS_PER_RUN: "5000"
+    command: ["python", "-m", "eventharbor.maintenance"]
+
+  frontend:
+    <<: *hardened
+    image: ${FRONTEND_IMAGE:?frontend digest required}
+    platform: linux/amd64
+    restart: unless-stopped
+    user: "101:101"
+    mem_limit: 64m
+    cpus: 0.50
+    environment:
+      API_UPSTREAM: http://api:8000
+      NGINX_ENVSUBST_FILTER: API_UPSTREAM
+    tmpfs:
+      - /tmp:size=16m,uid=101,gid=101,mode=1770
+      - /etc/nginx/conf.d:size=1m,uid=101,gid=101,mode=0755
+    volumes:
+      - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+    networks:
+      edge:
+        ipv4_address: 172.29.240.3
+      application: {}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  caddy:
+    <<: *hardened
+    image: ${CADDY_IMAGE:?official Caddy digest required}
+    platform: linux/amd64
+    restart: unless-stopped
+    # The upstream image uses root; only its listener capability is retained.
+    cap_add: [NET_BIND_SERVICE]
+    mem_limit: 64m
+    cpus: 0.50
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?hostname required}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME contact required}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      edge:
+        ipv4_address: 172.29.240.2
+    depends_on:
+      frontend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+# Only the HTTPS edge publishes host ports. Application containers can reach
+# private Azure PostgreSQL; neither network creates an internet ingress route.
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: 172.29.240.0/28
+  application: {}
+
+volumes:
+  caddy-data:
+  caddy-config:

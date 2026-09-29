@@ -1,0 +1,152 @@
+name: Deploy economy VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend_image:
+        description: Immutable backend GHCR image including @sha256 digest
+        required: true
+        type: string
+      frontend_image:
+        description: Immutable frontend GHCR image including @sha256 digest
+        required: true
+        type: string
+      source_sha:
+        description: Full main-branch commit SHA used to build both images
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eventharbor-economy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Verify released images and deploy economy VM
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    environment: azure-economy
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BACKEND_IMAGE: ${{ inputs.backend_image }}
+      FRONTEND_IMAGE: ${{ inputs.frontend_image }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      ECONOMY_DEPLOYMENT_ENABLED: ${{ vars.ECONOMY_DEPLOYMENT_ENABLED }}
+      ECONOMY_RESOURCE_GROUP: ${{ vars.ECONOMY_RESOURCE_GROUP }}
+      ECONOMY_VM_NAME: ${{ vars.ECONOMY_VM_NAME }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - name: Validate manual deployment inputs and target
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or $env:GITHUB_REF -cne 'refs/heads/main') {
+            throw 'Economy deployments must be manually started from main.'
+          }
+          if ($env:ECONOMY_DEPLOYMENT_ENABLED -cne 'true') {
+            throw 'Set ECONOMY_DEPLOYMENT_ENABLED to true before deploying.'
+          }
+          foreach ($name in @('ECONOMY_RESOURCE_GROUP', 'ECONOMY_VM_NAME', 'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Required economy deployment setting $name is missing."
+            }
+          }
+          if ($env:SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'source_sha must be a full lowercase Git commit SHA.'
+          }
+          $prefix = "ghcr.io/$($env:GITHUB_REPOSITORY.ToLowerInvariant())"
+          foreach ($kind in @('backend', 'frontend')) {
+            $image = [Environment]::GetEnvironmentVariable("$($kind.ToUpperInvariant())_IMAGE")
+            $pattern = '^' + [regex]::Escape("$prefix-$kind") + '@sha256:[0-9a-f]{64}$'
+            if ($image -cnotmatch $pattern) {
+              throw "$kind image must be an immutable digest in this repository's GHCR package."
+            }
+          }
+
+      - name: Require successful CI for the exact mainline source commit
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $comparisonJson = gh api "repos/$env:GITHUB_REPOSITORY/compare/$($env:SOURCE_SHA)...main"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not verify source commit ancestry.'
+          }
+          $comparison = $comparisonJson | ConvertFrom-Json
+          if ($comparison.status -notin @('ahead', 'identical') -or $comparison.merge_base_commit.sha -cne $env:SOURCE_SHA) {
+            throw 'The requested source commit is not on the current main branch history.'
+          }
+          $runsJson = gh api --method GET "repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" -f branch=main -f event=push -f "head_sha=$env:SOURCE_SHA" -f status=success -f per_page=100
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not read CI run evidence.'
+          }
+          $runs = $runsJson | ConvertFrom-Json
+          $passed = @($runs.workflow_runs | Where-Object {
+            $_.head_sha -ceq $env:SOURCE_SHA -and
+            $_.head_branch -ceq 'main' -and
+            $_.event -ceq 'push' -and
+            $_.status -ceq 'completed' -and
+            $_.conclusion -ceq 'success' -and
+            $_.head_repository.full_name -ceq $env:GITHUB_REPOSITORY
+          })
+          if ($passed.Count -eq 0) {
+            throw 'No successful main-branch push CI run exists for the exact requested source commit.'
+          }
+          Write-Host "Verified successful CI run $($passed[0].id) for $env:SOURCE_SHA."
+
+      - name: Verify both image digests and their source revision
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($image in @($env:BACKEND_IMAGE, $env:FRONTEND_IMAGE)) {
+            docker pull --platform linux/amd64 $image
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to pull released image $image."
+            }
+            $imageJson = docker image inspect $image
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to inspect released image $image."
+            }
+            $details = @($imageJson | ConvertFrom-Json)[0]
+            if ($details.Os -cne 'linux' -or $details.Architecture -cne 'amd64') {
+              throw 'Economy VMs require linux/amd64 images.'
+            }
+            if ($details.Config.Labels.'org.opencontainers.image.revision' -cne $env:SOURCE_SHA) {
+              throw 'Image source revision does not match source_sha.'
+            }
+            if ($details.Config.Labels.'org.opencontainers.image.source' -cne "https://github.com/$env:GITHUB_REPOSITORY") {
+              throw 'Image source repository does not match this repository.'
+            }
+          }
+
+      - name: Check out the current deployment controller
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Sign in to Azure with GitHub OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy the verified images to the economy VM
+        shell: pwsh
+        run: |
+          ./scripts/azure-economy/deploy.ps1 `
+            -SubscriptionId $env:AZURE_SUBSCRIPTION_ID `
+            -ResourceGroup $env:ECONOMY_RESOURCE_GROUP `
+            -VmName $env:ECONOMY_VM_NAME `
+            -BackendImage $env:BACKEND_IMAGE `
+            -FrontendImage $env:FRONTEND_IMAGE `
+            -ExpectedSourceRevision $env:SOURCE_SHA

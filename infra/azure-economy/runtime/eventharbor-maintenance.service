@@ -1,0 +1,19 @@
+[Unit]
+Description=EventHarbor bounded demo maintenance
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/eventharbor/current.env
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/opt/eventharbor/runtime/maintenance.sh
+TimeoutStartSec=900
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/lock /var/log/eventharbor

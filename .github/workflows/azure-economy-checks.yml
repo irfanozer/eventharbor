@@ -1,0 +1,89 @@
+name: Azure economy checks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/azure-economy/**"
+      - "scripts/azure-economy/**"
+      - "tests/deployment/test_economy*"
+      - "tests/deployment/test_resize_existing_api.ps1"
+      - ".github/workflows/azure-economy-checks.yml"
+  pull_request:
+    paths:
+      - "infra/azure-economy/**"
+      - "scripts/azure-economy/**"
+      - "tests/deployment/test_economy*"
+      - "tests/deployment/test_resize_existing_api.ps1"
+      - ".github/workflows/azure-economy-checks.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-checks:
+    name: Validate economy deployment files without cloud access
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Test private runtime configuration
+        run: python infra/azure-economy/runtime/test_runtime.py
+
+      - name: Test database initialization with local mocks
+        run: python tests/deployment/test_economy_initializer.py
+
+      - name: Parse economy PowerShell scripts
+        shell: pwsh
+        run: |
+          Get-ChildItem scripts/azure-economy/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $problems = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$tokens, [ref]$problems)
+            if ($problems.Count) {
+              throw ($problems | Out-String)
+            }
+          }
+
+      - name: Test quota and billing guards with local mocks
+        shell: pwsh
+        run: ./tests/deployment/test_economy_preflight.ps1
+
+      - name: Test deployment controller with local mocks
+        shell: pwsh
+        run: ./tests/deployment/test_economy_controller.ps1
+
+      - name: Test existing API resize safeguards with local mocks
+        shell: pwsh
+        run: ./tests/deployment/test_resize_existing_api.ps1
+
+      - name: Check runtime shell syntax
+        shell: bash
+        run: |
+          for script in infra/azure-economy/runtime/*.sh; do
+            bash -n "$script"
+          done
+
+      - name: Validate Compose with example values without starting containers
+        env:
+          BACKEND_IMAGE: ghcr.io/irfanozer/eventharbor-backend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          FRONTEND_IMAGE: ghcr.io/irfanozer/eventharbor-frontend@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+        run: >-
+          docker compose
+          --env-file infra/azure-economy/runtime/runtime.env.example
+          -f infra/azure-economy/runtime/compose.yaml
+          --profile tasks config --quiet
+
+      - name: Compile the economy foundation without deploying
+        run: az bicep build --file infra/azure-economy/foundation.bicep --stdout > /dev/null

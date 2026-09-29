@@ -1,0 +1,20 @@
+{
+	email {$ACME_EMAIL}
+	admin 127.0.0.1:2019
+	servers {
+		timeouts {
+			read_header 10s
+			idle 90s
+		}
+	}
+}
+
+{$PUBLIC_HOSTNAME} {
+	encode zstd gzip
+	reverse_proxy frontend:8080 {
+		# Replace client-supplied identity headers at the only public entry point.
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}
