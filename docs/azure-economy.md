@@ -2,7 +2,7 @@
 
 ## Status: selected replacement, cutover still requires verification
 
-This deployment is the selected replacement for the existing Container Apps deployment. Follow the [combined migration runbook](economy-migration.md): both source databases move directly to the new shared server. The new foundation has been provisioned after quota approval, but that is not proof that database copy, application cutover, or source retirement is complete. It does not replace or edit `infra/azure`, `scripts/azure`, or the production workflow.
+This deployment is the selected replacement for the existing Container Apps deployment. The current approved route starts both new application databases with fresh demo data; the old demo history does not need a final copy. Previously verified rehearsal backups remain available. The [combined migration runbook](economy-migration.md) also documents the full-history route for future use. The new foundation has been provisioned after quota approval, but application cutover and source retirement still require verification. It does not replace or edit `infra/azure`, `scripts/azure`, or the production workflow.
 
 The selected layout is **two B2ats_v2 VMs in West US 2**, with explicit acknowledgment that they share one allowance and some compute is paid. Azure approved four Standard Basv2 family vCPUs, and both VMs plus the shared private PostgreSQL server have been provisioned in `rg-demos-economy`. The earlier zero-quota finding was resolved by that approval. Capacity restrictions observed in East US and East US 2 before approval explain the region choice; they do not block this provisioned foundation. The templates still retain their distinct-SKU default for other reviewed deployments.
 
@@ -84,17 +84,19 @@ Supply an SSH **public** key even if public SSH remains closed. Keep the private
 
 Record the output VM names, public DNS names, and PostgreSQL server name. These are not secrets. Do not publish administrator credentials. Test using each VM's Azure-provided DNS name before moving custom domains.
 
-## 3. Restore existing databases, then attach their retained roles
+## 3. Initialize the approved fresh demo databases
 
-For the current migration, follow [the combined migration runbook](economy-migration.md): inspect and rehearse both copies, freeze the old writers, make both final copies, and verify both final results. The copy process creates and retains the separate application roles and passwords. Complete both final verifications before attaching either application VM.
+For the current route, use `scripts/azure-economy/initialize-runtime.ps1` once per project on the exact new foundation. The user approved fresh demo data, so do not run `FinalCopy` or attach the rehearsal databases. Preserve the verified rehearsal backups while testing the replacement.
 
-Then use the EventHarbor checkout's `scripts/azure-economy/attach-restored-runtime.ps1` for each project, as described in [attaching a restored database](azure-economy-attach-restored-runtime.md). Supply the retained application password, the new shared PostgreSQL hostname, and the corresponding new VM preview hostname. Attach validates the restored database, role isolation, ownership, and TLS using read-only queries. It writes `/etc/<project>/runtime.env` with root ownership and mode 0600, without creating a role, rotating a password, or starting an application. It refuses to overwrite existing runtime configuration.
+Supply the new PostgreSQL administrator password as `-PostgresAdministratorPassword` and the retained application password as `-AppPassword`, both `SecureString` values. If `-AppPassword` is omitted, the initializer generates a new random password. A supplied application password must contain 32 to 256 characters. Passwords are transmitted only as protected Run Command parameters, never command-line values or public outputs.
 
-Do not run `initialize-runtime.ps1` against these restored databases. A successful attach confirms its checks and configuration write, not successful application deployment or public cutover. Deployment also keeps root-only current, previous and failed release configurations as documented in the runtime README. Routine CI deployment does not need database credentials.
+The initializer requires the exact new server, project VM, administrator, and an untouched empty foundation database. In one transaction it checks for unexpected schemas, data, types, routines, extensions, roles, and sessions; creates the restricted app role with a 12-connection limit; transfers the Azure-owned public schema while the administrator still owns the database; transfers database ownership; and revokes PUBLIC access. It refuses an existing role or runtime file, and never drops or resets data. It then writes `/etc/<project>/runtime.env` with root ownership and mode 0600. If a partial operation fails, inspect the retained operation before retrying.
 
-### Fresh deployments with no history to preserve
+Initialize both projects before starting either application. The existing deployment scripts then run schema migrations. PulseExchange seeds its fictional starter markets through its API; EventHarbor demo checks create sample events. Initialization alone does not prove that either public application works.
 
-`scripts/azure-economy/initialize-runtime.ps1` is the separate path for a fresh, empty deployment. It accepts `-Project eventharbor` or `-Project pulseexchange`, prompts for the new database administrator password, and creates a random application password and isolated role. It prepares empty databases and runtime configuration; it does not copy existing history. Use this initializer only when deliberately creating a fresh deployment. If initialization partially fails, inspect the protected operation before retrying. Both helpers provide `-DryRun` for local input validation without Azure calls.
+### Alternative when old history must be preserved
+
+Use the combined runbook's final copy and independent verification for both databases, followed by `attach-restored-runtime.ps1` with the retained app passwords. That helper validates restored schema and role isolation using read-only queries and creates only root-owned runtime configuration. Do not run the fresh initializer against restored data. See [attaching a restored database](azure-economy-attach-restored-runtime.md). Both helpers offer `-DryRun` without Azure calls. Routine CI deployment does not receive database credentials.
 
 ## 4. Deploy and test without changing production DNS
 
@@ -148,7 +150,7 @@ Before publishing migration files or cutting over, deliberately disable the old 
 
 Do not change the live databases, domains, or old deployments during the initial parallel test. Before cutover, agree on a brief write freeze and a retention/backup plan. The current database endpoints are private, so a data migration needs an explicitly reviewed private access path. Do not open PostgreSQL publicly to make a dump easier.
 
-Take and verify backups of both old databases. For a full-history move, restore into the new matching database with ownership mapped to its application role, then rerun migrations and smoke tests. Never run two processors/workers against the same production database as a shortcut. A test restore made earlier is stale once new writes occur; a final write freeze and final copy are needed to avoid losing those writes.
+The current fresh-demo route retains the verified rehearsal backups but intentionally discards old demo history after replacement verification. For a future full-history move, take and verify backups of both old databases, restore into the new matching database with ownership mapped to its application role, then rerun migrations and smoke tests. Never run two processors/workers against the same production database as a shortcut. A test restore made earlier is stale once new writes occur; a full-history move needs a final write freeze and copy.
 
 Only after approval, update each VM's protected hostname configuration and move the corresponding custom-domain DNS record to its new VM IP. Plan Caddy certificate issuance and DNS cache overlap. Keep the old endpoints available during verification. Check the final public URLs, not only the temporary Azure hostnames.
 
