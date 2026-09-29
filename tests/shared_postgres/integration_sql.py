@@ -76,7 +76,7 @@ class CopySqlIntegration(unittest.TestCase):
         existing = bootstrap.json("SELECT (SELECT count(*) FROM pg_database WHERE datname IN "
                                   "('fixture_event_source','fixture_pulse_source','eventharbor_rehearsal','pulseexchange_rehearsal','eventharbor','pulseexchange')) + "
                                   "(SELECT count(*) FROM pg_roles WHERE rolname IN "
-                                  "('fixture_source_admin','fixture_target_admin','portfolio_admin','eventharbor_app','pulseexchange_app','eventharbor_rehearsal_app','pulseexchange_rehearsal_app')); ")
+                                  "('fixture_source_admin','fixture_target_admin','portfolio_admin','azure_pg_admin','eventharbor_app','pulseexchange_app','eventharbor_rehearsal_app','pulseexchange_rehearsal_app')); ")
         self.assertEqual(existing, 0, "Fixture requires a fresh disposable PostgreSQL container; no existing objects are overwritten.")
         source_password, target_password = secrets.token_hex(24), secrets.token_hex(24)
         bootstrap.sql("\\getenv source_fixture_password FIXTURE_SOURCE_PASSWORD\n"
@@ -87,6 +87,8 @@ class CopySqlIntegration(unittest.TestCase):
                       "NOSUPERUSER CREATEDB CREATEROLE NOREPLICATION NOBYPASSRLS;\n"
                       "CREATE ROLE portfolio_admin LOGIN PASSWORD :'target_fixture_password' "
                       "NOSUPERUSER CREATEDB CREATEROLE NOREPLICATION NOBYPASSRLS;\n"
+                      "CREATE ROLE azure_pg_admin NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;\n"
+                      "GRANT azure_pg_admin TO portfolio_admin WITH INHERIT TRUE;\n"
                       "GRANT pg_read_all_stats TO fixture_source_admin,fixture_target_admin,portfolio_admin;\nCOMMIT;",
                       readonly=False, extra_env={"FIXTURE_SOURCE_PASSWORD": source_password,
                                                  "FIXTURE_TARGET_PASSWORD": target_password})
@@ -155,6 +157,19 @@ class CopySqlIntegration(unittest.TestCase):
                                          + " TEMPLATE template0 ENCODING 'UTF8' LOCALE_PROVIDER libc LC_COLLATE 'C' LC_CTYPE 'C';",
                                          readonly=False)
                     foundation_database = economy.EconomyPg(replace(foundation_admin.database, name=project), RUN_ID)
+                    # Emulate the observed Azure layout: DB owner is the login,
+                    # public schema is owned by its inherited azure_pg_admin role.
+                    m.Pg(replace(bootstrap.database, name=project), RUN_ID).sql(
+                        "ALTER SCHEMA public OWNER TO azure_pg_admin;", readonly=False)
+                    bootstrap.sql("REVOKE azure_pg_admin FROM portfolio_admin;", readonly=False)
+                    with self.assertRaises(m.SafeError):
+                        foundation_admin.empty_foundation(project, project + "_app", source.locale())
+                    bootstrap.sql("GRANT azure_pg_admin TO portfolio_admin WITH INHERIT TRUE;", readonly=False)
+                    ownership = foundation_database.json(
+                        "SELECT json_build_object('owner',pg_get_userbyid(nspowner),"
+                        "'effective_owner',pg_has_role(current_user,nspowner,'USAGE')) "
+                        "FROM pg_namespace WHERE nspname='public';")
+                    self.assertEqual(ownership, {"owner": "azure_pg_admin", "effective_owner": True})
                     foundation_database.sql("CREATE TABLE public.fixture_refusal_probe(value text); "
                                             "INSERT INTO public.fixture_refusal_probe VALUES ('must remain after refusal');", readonly=False)
                     with self.assertRaises(m.SafeError):

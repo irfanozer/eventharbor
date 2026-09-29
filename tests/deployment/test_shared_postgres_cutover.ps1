@@ -23,7 +23,7 @@ function Assert-Check([bool]$Condition,[string]$Message) {
 }
 function Invoke-FreezeFixture {
     param([string]$TestProject='pulseexchange',[string[]]$Actions=@('Inspect'),[switch]$NoApply,
-          [switch]$Recover,[string]$Fault='')
+          [switch]$Recover,[string]$Fault='',[string]$TestLocation='eastus2')
     $StateDirectory=New-EconomyPrivateDirectory
     $Project=$TestProject; $SubscriptionId=[guid]$subscription; $Apply=-not $NoApply
     $ConfirmSourceStillAuthoritative=[bool]$Recover
@@ -37,7 +37,7 @@ function Invoke-FreezeFixture {
             @{triggerType=$(if ($part -eq $scheduled) {'Schedule'} else {'Manual'});replicaTimeout=900;replicaRetryLimit=0;
               scheduleTriggerConfig=@{cronExpression='0 4 * * *';parallelism=1;replicaCompletionCount=1}}
         }
-        $configs[$name]=@{id=$id;location='eastus2';tags=@{application=$Project;environment='prod'};
+        $configs[$name]=@{id=$id;location=$TestLocation;tags=@{application=$Project;environment='prod'};
             properties=@{environmentId="/subscriptions/$subscription/resourceGroups/rg-$Project-prod/providers/Microsoft.App/managedEnvironments/cae-$Project-prod";
                 provisioningState='Succeeded';configuration=$configuration;
                 template=@{containers=@(@{name=$part;image='immutable-image';resources=@{cpu=0.25;memory='0.5Gi'};env=@(@{name='DATABASE_URL';secretRef='database-url'})});scale=@{minReplicas=1;maxReplicas=1}}}}
@@ -140,6 +140,12 @@ $result=Invoke-FreezeFixture -Actions PauseJobs -NoApply
 Assert-Check (-not $result.Failed -and $result.Calls -eq 0) 'Plan mode accessed Azure.'
 $result=Invoke-FreezeFixture
 Assert-Check (-not $result.Failed -and $result.Bodies -eq 0 -and $result.Operations.Count -eq 0) "Inspect failed or mutated state: $($result.Failure)"
+$result=Invoke-FreezeFixture -TestLocation 'East US 2'
+Assert-Check (-not $result.Failed -and $result.Bodies -eq 0 -and $result.Operations.Count -eq 0) "Azure display-name region was not normalized: $($result.Failure)"
+foreach ($wrongRegion in @('East US','West US 2')) {
+    $result=Invoke-FreezeFixture -Actions PauseJobs -TestLocation $wrongRegion
+    Assert-Check ($result.Failed -and $result.Bodies -eq 0 -and $result.Operations.Count -eq 0) 'An unapproved consumer region was accepted.'
+}
 foreach ($fault in @('enabled','workflow','unknown-job','patch-failure')) {
     $result=Invoke-FreezeFixture -Actions PauseJobs -Fault $fault
     Assert-Check $result.Failed 'A deployment/job/patch blocker was ignored.'

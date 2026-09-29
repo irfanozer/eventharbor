@@ -69,6 +69,7 @@ class EconomyPg(m.Pg):
                                "'owner',(SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname=current_database()),"
                                "'schemas',(SELECT coalesce(json_agg(nspname ORDER BY nspname),'[]'::json) FROM pg_namespace n WHERE " + USER_NAMESPACE + "),"
                                "'public_owner',(SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='public'),"
+                               "'public_owner_access',(SELECT pg_has_role(current_user,nspowner,'USAGE') FROM pg_namespace WHERE nspname='public'),"
                                "'relations',(SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE " + USER_NAMESPACE + "),"
                                "'types',(SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE " + USER_NAMESPACE + "),"
                                "'routines',(SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE " + USER_NAMESPACE + "),"
@@ -78,7 +79,8 @@ class EconomyPg(m.Pg):
                                "'role_exists',EXISTS(SELECT 1 FROM pg_roles WHERE rolname=" + m.literal(role) + "));")
         if (metadata["database"] != database or metadata["user"] != FOUNDATION_OWNER
                 or metadata["owner"] != FOUNDATION_OWNER or metadata["schemas"] != ["public"]
-                or metadata["public_owner"] not in {FOUNDATION_OWNER, "pg_database_owner"}
+                or metadata["public_owner"] not in {FOUNDATION_OWNER, "pg_database_owner", "azure_pg_admin"}
+                or metadata.get("public_owner_access") is not True
                 or metadata["extensions"] != ["plpgsql"] or metadata["role_exists"]
                 or any(metadata[key] for key in ("relations", "types", "routines", "large_objects", "event_triggers"))):
             raise m.SafeError("Destination is not an untouched empty foundation database with the exact owner and absent app role.")
@@ -98,7 +100,7 @@ class EconomyPg(m.Pg):
         sql += "OR EXISTS(SELECT 1 FROM pg_roles WHERE rolname=" + m.literal(role) + ") "
         sql += "OR (SELECT count(*) FROM pg_namespace n WHERE " + USER_NAMESPACE + ")<>1 "
         sql += "OR NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='public') "
-        sql += "OR EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='public' AND pg_get_userbyid(nspowner) NOT IN ('portfolio_admin','pg_database_owner')) "
+        sql += "OR EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='public' AND (pg_get_userbyid(nspowner) NOT IN ('portfolio_admin','pg_database_owner','azure_pg_admin') OR NOT pg_has_role(current_user,nspowner,'USAGE'))) "
         for catalog, alias, namespace in (("pg_class", "c", "relnamespace"), ("pg_type", "t", "typnamespace"), ("pg_proc", "p", "pronamespace")):
             sql += "OR EXISTS(SELECT 1 FROM " + catalog + " " + alias + " JOIN pg_namespace n ON n.oid=" + alias + "." + namespace + " WHERE " + USER_NAMESPACE + ") "
         sql += "OR EXISTS(SELECT 1 FROM pg_extension WHERE extname<>'plpgsql') "

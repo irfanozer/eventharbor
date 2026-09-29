@@ -24,7 +24,7 @@ MANIFEST = {"tables": [], "sequences": [], "alembic_version": ["fixture_0001"]}
 
 def metadata(project):
     return {"database": project, "user": "portfolio_admin", "owner": "portfolio_admin",
-            "schemas": ["public"], "public_owner": "pg_database_owner", "relations": 0,
+            "schemas": ["public"], "public_owner": "pg_database_owner", "public_owner_access": True, "relations": 0,
             "types": 0, "routines": 0, "extensions": ["plpgsql"], "large_objects": 0,
             "event_triggers": 0, "role_exists": False}
 
@@ -59,7 +59,8 @@ class EmptyFoundationTests(unittest.TestCase):
     def test_data_types_routines_extensions_roles_and_wrong_owners_refused(self):
         mutations = ({"relations": 1}, {"types": 1}, {"routines": 1}, {"extensions": ["plpgsql", "other"]},
                      {"role_exists": True}, {"large_objects": 1}, {"event_triggers": 1},
-                     {"owner": "other"}, {"user": "other"}, {"public_owner": "other"},
+                     {"owner": "other"}, {"user": "other"}, {"public_owner": "other"}, {"public_owner_access": False},
+                     {"public_owner": "azure_pg_admin", "public_owner_access": False},
                      {"schemas": ["public", "unexpected"]}, {"database": "pulseexchange"})
         for mutation in mutations:
             value = {**metadata("eventharbor"), **mutation}
@@ -67,6 +68,17 @@ class EmptyFoundationTests(unittest.TestCase):
                 with self.assertRaises(m.SafeError):
                     self.admin.claim_empty_foundation("eventharbor", "eventharbor_app", PASSWORD, LOCALE)
                 sql.assert_not_called()
+
+    def test_exact_azure_public_owner_requires_effective_owner_membership(self):
+        for project in e.SOURCES:
+            value = {**metadata(project), "public_owner": "azure_pg_admin"}
+            with patch.object(e.EconomyPg, "require_version"), patch.object(e.EconomyPg, "json", side_effect=[value, 0]), patch.object(e.EconomyPg, "locale", return_value=LOCALE), patch.object(e.EconomyPg, "sql") as execute:
+                self.admin.claim_empty_foundation(project, project + "_app", PASSWORD, LOCALE)
+            statement = execute.call_args.args[0]
+            self.assertIn("NOT IN ('portfolio_admin','pg_database_owner','azure_pg_admin')", statement)
+            self.assertIn("OR NOT pg_has_role(current_user,nspowner,'USAGE')", statement)
+            self.assertLess(statement.index("pg_has_role(current_user,nspowner,'USAGE')"), statement.index("CREATE ROLE"))
+            self.assertLess(statement.index("GRANT CREATE ON DATABASE"), statement.index("ALTER SCHEMA public OWNER TO"))
 
     def test_locale_and_active_sessions_refused(self):
         with patch.object(e.EconomyPg, "require_version"), patch.object(e.EconomyPg, "json", return_value=metadata("eventharbor")), patch.object(e.EconomyPg, "locale", return_value={**LOCALE, "collate": "C"}), self.assertRaises(m.SafeError):

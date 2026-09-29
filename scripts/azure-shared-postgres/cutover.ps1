@@ -100,7 +100,7 @@ function Get-CutoverConfig($Consumer, [switch]$AllowUpdating) {
     $id = Get-CutoverId $Consumer
     $value = Invoke-CutoverAzure @('rest','--method','get','--url',(Get-CutoverUrl $id))
     if ($value.id -ine $id -or $value.tags.application -ine $Project -or $value.tags.environment -cne 'prod' -or
-        $value.location -ine 'eastus2' -or
+        $value.location.Replace(' ','').ToLowerInvariant() -cne 'eastus2' -or
         $value.properties.environmentId -ine "/subscriptions/$SubscriptionId/resourceGroups/$resourceGroup/providers/Microsoft.App/managedEnvironments/cae-$Project-prod" -or
         @($value.properties.template.containers).Count -ne 1) { throw 'Consumer identity or single-container shape mismatch.' }
     if (-not $AllowUpdating -and $value.properties.provisioningState -cne 'Succeeded') { throw 'Consumer provisioning is not ready.' }
